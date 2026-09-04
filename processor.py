@@ -484,16 +484,29 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
             delete_from_r2(staging_key)
 
         # ── Update kit's file_count ────────────────────────────────────────
-        total_processed = new_files_count + duplicate_files_count
+        # INCREMENT, not overwrite — the backend already set an initial
+        # file_count on drum_kits when it created the kit (covering
+        # already-owned files it placed directly, with zero worker
+        # involvement). Overwriting here would clobber that number
+        # instead of adding this job's contribution on top of it.
+        # Read-then-write, matching the same non-atomic pattern used
+        # elsewhere in this file (e.g. reference_count) — fine at
+        # current concurrency, worth a Postgres increment function
+        # later if this becomes a hot path.
+        total_processed_this_job = new_files_count + duplicate_files_count
+
+        current_kit = supabase.table("drum_kits").select("file_count").eq("id", drum_kit_id).single().execute()
+        current_count = current_kit.data.get("file_count", 0) if current_kit.data else 0
+
         supabase.table("drum_kits").update({
-            "file_count": total_processed,  # maintained counter, matches actual rows written this job
+            "file_count": current_count + total_processed_this_job,
         }).eq("id", drum_kit_id).execute()
 
         # ── Finalize job ──────────────────────────────────────────────────
         if flagged_pairs_count > 0:
             update_job_status(
                 job_id, "pending_review",
-                total_files=total_processed,
+                total_files=total_processed_this_job,
                 new_files=new_files_count,
                 duplicate_files=duplicate_files_count,
                 flagged_pairs_count=flagged_pairs_count,
@@ -509,7 +522,7 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
         else:
             update_job_status(
                 job_id, "completed",
-                total_files=total_processed,
+                total_files=total_processed_this_job,
                 new_files=new_files_count,
                 duplicate_files=duplicate_files_count,
                 flagged_pairs_count=0,
