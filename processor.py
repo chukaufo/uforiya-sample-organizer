@@ -125,12 +125,57 @@ def load_category_keywords() -> dict:
     return keyword_map
 
 
+import re
+from difflib import SequenceMatcher
+
+
+def _tokenize(text: str) -> list:
+    """
+    Splits a filename/folder string into individual tokens on common
+    naming delimiters (underscore, hyphen, space, digit runs) so
+    matching compares whole words rather than searching for a keyword
+    as a raw substring anywhere in the string. This alone catches
+    more real-world naming (e.g. "Vintage_Kick_v2" tokenizes to
+    ["vintage", "kick", "v2"], matching "kick" cleanly) without any
+    fuzzy logic yet.
+    """
+    tokens = re.split(r'[_\-\s\d]+', text.lower())
+    return [t for t in tokens if t]
+
+
+def _fuzzy_match(token: str, keyword: str) -> bool:
+    """
+    Edit-distance-based similarity via difflib's SequenceMatcher
+    (stdlib, no new dependency). Threshold scales with keyword length
+    — short keywords (3-4 letters, e.g. "hat", "808") need a tighter
+    ratio than long ones, since a 1-character difference on a short
+    word is a much bigger relative change than on a long one. This is
+    what catches abbreviations and typos like "kck" for "kick" or
+    "snr" for "snare" that exact substring matching never will.
+    """
+    if token == keyword:
+        return True
+
+    threshold = 0.85 if len(keyword) <= 4 else 0.75
+    return SequenceMatcher(None, token, keyword).ratio() >= threshold
+
+
 def match_category_by_keywords(text: str, keyword_map: dict) -> Optional[str]:
-    text_lower = text.lower()
+    """
+    Tokenizes the input, then checks each token against every known
+    keyword — exact match first (cheap, no false-positive risk),
+    fuzzy match second (catches abbreviations/typos exact matching
+    misses). Returns the first category with any matching token.
+    """
+    tokens = _tokenize(text)
+    if not tokens:
+        return None
+
     for category, keywords in keyword_map.items():
-        for kw in keywords:
-            if kw in text_lower:
-                return category
+        for token in tokens:
+            for kw in keywords:
+                if _fuzzy_match(token, kw):
+                    return category
     return None
 
 
@@ -177,8 +222,12 @@ def categorize_file(relative_path: str, filename: str, features: dict, keyword_m
     if tier3:
         return tier3, "confident", "tier3_audio"
 
-    return None, "unsure", "tier3_audio"
-
+    # Genuine last resort — nothing in Tier 1 (folder), Tier 2
+    # (filename), or Tier 3 (audio heuristics) produced a confident
+    # match. "Other" has no keyword rows in category_keywords by
+    # design (see seed migration) and is never matched via Tier 1/2 —
+    # it only ever gets assigned here.
+    return "Other", "unsure", "tier3_audio"
 
 def log_keyword_miss(raw_token: str, resolved_category: str, sample_id: str) -> None:
     """
