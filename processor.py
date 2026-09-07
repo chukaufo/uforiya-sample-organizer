@@ -1,8 +1,8 @@
 # Core drumkit processing logic.
 # Per staged file: re-validate (trust backstop), hash-dedupe, fingerprint
-# genuinely new sounds, categorize (Tier 1 → Tier 2 → Tier 3), generate
-# waveform peaks as a fingerprinting byproduct, and flag intra-user
-# near-duplicates for review.
+# genuinely new sounds, categorize (Tier 1 → Tier 2 → Tier 3), and
+# generate waveform peaks as a fingerprinting byproduct.
+# Near-dupe flagging is present but disabled — see NEAR_DUPE_ENABLED.
 import os
 import json
 import hashlib
@@ -20,14 +20,28 @@ from notifier import notify_user, email_admin
 MAX_DURATION_SECONDS = 90
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 ALLOWED_EXTENSIONS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
-SIMILARITY_THRESHOLD = 0.95  # near-dupe flag cutoff, cosine similarity on segmented MFCC
+# Near-dupe detection is DISABLED. Exact-hash dedup (the primary
+# mechanism) works perfectly and is untouched — this only turns off the
+# fuzzy "these two sound similar" comparison.
+#
+# Why: MFCC cosine similarity isn't discriminating enough for this.
+# Even after switching to segmented MFCCs and adding a duration gate,
+# a 185-file kit produced 232 flags, and spot-checking confirmed
+# audibly different sounds scoring 97%. MFCCs describe broad timbre;
+# two unrelated sounds with similar processing and frequency balance
+# land close together regardless of how different they sound. Raising
+# the threshold would cut the count but keep flagging wrong pairs —
+# fewer false positives, harder to dismiss.
+#
+# Fingerprints are still computed and stored. They're a near-free
+# byproduct of the librosa.load that categorization needs anyway, and
+# having real fingerprint data accumulating means a better similarity
+# approach can be evaluated offline against stored vectors rather than
+# needing everything reprocessed.
+NEAR_DUPE_ENABLED = False
 
-# Two sounds whose lengths differ by more than this ratio are never
-# compared — a 3.5s loop and a 0.85s one-shot aren't duplicates no
-# matter how similar their timbre, and the old fingerprint flagged
-# exactly those pairs constantly. Cheap check, runs before any vector
-# math, and eliminates the largest class of false positive on its own.
-MAX_DURATION_RATIO = 1.25
+SIMILARITY_THRESHOLD = 0.95  # unused while NEAR_DUPE_ENABLED is False
+MAX_DURATION_RATIO = 1.25    # unused while NEAR_DUPE_ENABLED is False
 WAVEFORM_NUM_POINTS = 1000
 
 
@@ -562,18 +576,22 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
                 new_sample_ids_this_job.append((sample_id, features, category, confidence))
 
                 # ── Near-dupe comparison, intra-user only ──────────────────
-                dupes = find_near_dupes(user_id, sample_id, features, category, confidence)
-                for matched_id, score in dupes:
-                    supabase.table("near_dupe_flags").insert({
-                        "user_id": user_id,
-                        "drumkit_job_id": job_id,
-                        "sample_a_id": sample_id,
-                        "sample_b_id": matched_id,
-                        "similarity_score": score,
-                        "status": "pending",
-                    }).execute()
-                    flagged_pairs_count += 1
-                    print(f"[processor] Near-dupe flagged: {score * 100:.1f}% match")
+                # Off by default — see NEAR_DUPE_ENABLED. The comparison
+                # itself was also the slowest non-audio step in the job,
+                # since it re-queried the user's whole library per sample.
+                if NEAR_DUPE_ENABLED:
+                    dupes = find_near_dupes(user_id, sample_id, features, category, confidence)
+                    for matched_id, score in dupes:
+                        supabase.table("near_dupe_flags").insert({
+                            "user_id": user_id,
+                            "drumkit_job_id": job_id,
+                            "sample_a_id": sample_id,
+                            "sample_b_id": matched_id,
+                            "similarity_score": score,
+                            "status": "pending",
+                        }).execute()
+                        flagged_pairs_count += 1
+                        print(f"[processor] Near-dupe flagged: {score * 100:.1f}% match")
 
             # ── Folder + user_samples row (runs for both new and existing) ──
             folder_dir = os.path.dirname(relative_path)
