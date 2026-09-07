@@ -20,7 +20,14 @@ from notifier import notify_user, email_admin
 MAX_DURATION_SECONDS = 90
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
 ALLOWED_EXTENSIONS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
-SIMILARITY_THRESHOLD = 0.95  # near-dupe flag cutoff, cosine similarity on MFCC
+SIMILARITY_THRESHOLD = 0.95  # near-dupe flag cutoff, cosine similarity on segmented MFCC
+
+# Two sounds whose lengths differ by more than this ratio are never
+# compared — a 3.5s loop and a 0.85s one-shot aren't duplicates no
+# matter how similar their timbre, and the old fingerprint flagged
+# exactly those pairs constantly. Cheap check, runs before any vector
+# math, and eliminates the largest class of false positive on its own.
+MAX_DURATION_RATIO = 1.25
 WAVEFORM_NUM_POINTS = 1000
 
 
@@ -69,22 +76,54 @@ def generate_waveform_peaks(y: np.ndarray, num_points: int = WAVEFORM_NUM_POINTS
     return [round(p / max_peak, 4) for p in peaks]
 
 
+# How many time segments the MFCC fingerprint is split into. The
+# original version averaged every frame into one 13-number vector,
+# which discarded time entirely — a 3.5s melodic loop and a 2s vocal
+# chop with similar overall timbre scored 97% identical, and a 185-file
+# kit produced 739 false-positive flags.
+#
+# Splitting into segments keeps coarse time structure: a kick has its
+# energy front-loaded and decays, a sustained loop spreads energy
+# across all segments. Four is a deliberate middle ground — enough to
+# distinguish shape, few enough that a slightly different trim or
+# fade-in doesn't push a genuine duplicate below threshold.
+FINGERPRINT_SEGMENTS = 4
+
+
 def extract_features(y: np.ndarray, sr: int) -> dict:
     """
     Single audio load, multiple reuses: this same feature set backs the
     dedup fingerprint, the Tier 3 categorization fallback, and (via
     mfcc alone) the near-dupe cosine comparison — computed once here
     rather than three separate librosa passes.
+
+    The mfcc field is a flattened per-segment mean: FINGERPRINT_SEGMENTS
+    chunks x 13 coefficients = 52 values. NOT interchangeable with the
+    old 13-value whole-clip mean — comparing across formats produces
+    garbage, so changing FINGERPRINT_SEGMENTS means every stored
+    fingerprint needs regenerating.
     """
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    mfcc_mean = [float(x) for x in np.mean(mfcc, axis=1)]
+
+    # Split the frame axis into equal segments and average within each,
+    # rather than averaging the whole thing at once. np.array_split
+    # handles the case where frame count doesn't divide evenly.
+    segments = np.array_split(mfcc, FINGERPRINT_SEGMENTS, axis=1)
+    mfcc_segmented = []
+    for segment in segments:
+        # A very short clip can yield an empty segment — pad with zeros
+        # so every fingerprint is the same length regardless of duration.
+        if segment.shape[1] == 0:
+            mfcc_segmented.extend([0.0] * 13)
+        else:
+            mfcc_segmented.extend(float(x) for x in np.mean(segment, axis=1))
 
     spectral_centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
     zcr = float(np.mean(librosa.feature.zero_crossing_rate(y)))
     duration = float(len(y) / sr)
 
     return {
-        "mfcc": mfcc_mean,
+        "mfcc": mfcc_segmented,
         "spectral_centroid": spectral_centroid,
         "zcr": zcr,
         "duration": duration,
@@ -359,9 +398,31 @@ def find_near_dupes(user_id: str, new_sample_id: str, fingerprint: dict, categor
     scope_category = category if confidence == "confident" else None
     pool = get_user_sample_pool(user_id, scope_category, exclude_sample_id=new_sample_id)
 
+    new_duration = fingerprint.get("duration")
+    new_mfcc = fingerprint.get("mfcc") or []
+
     matches = []
     for other_id, other_fp in pool:
-        score = cosine_similarity(fingerprint["mfcc"], other_fp["mfcc"])
+        other_mfcc = other_fp.get("mfcc") or []
+
+        # Skip anything stored under a different fingerprint format.
+        # Comparing a 52-value segmented vector against a legacy
+        # 13-value whole-clip mean produces meaningless numbers rather
+        # than an error, so this guards against silently bad scores if
+        # any old rows survive a migration.
+        if len(other_mfcc) != len(new_mfcc):
+            continue
+
+        # Duration gate before any vector math — cheapest possible
+        # rejection, and the one that kills most false positives.
+        other_duration = other_fp.get("duration")
+        if new_duration and other_duration:
+            longer = max(new_duration, other_duration)
+            shorter = min(new_duration, other_duration)
+            if shorter > 0 and (longer / shorter) > MAX_DURATION_RATIO:
+                continue
+
+        score = cosine_similarity(new_mfcc, other_mfcc)
         if score >= SIMILARITY_THRESHOLD:
             matches.append((other_id, round(score, 4)))
     return matches
