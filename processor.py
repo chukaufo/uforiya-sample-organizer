@@ -6,7 +6,6 @@
 import os
 import json
 import hashlib
-import subprocess
 import tempfile
 from typing import Optional
 import librosa
@@ -37,33 +36,25 @@ def compute_sha256(file_path: str) -> str:
     return h.hexdigest()
 
 
-def probe_duration(file_path: str) -> Optional[float]:
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", file_path],
-            capture_output=True, text=True,
-        )
-        streams = json.loads(probe.stdout).get("streams", [])
-        if streams and streams[0].get("duration"):
-            return float(streams[0]["duration"])
-    except Exception as e:
-        print(f"[processor] Duration probe failed: {e}")
-    return None
-
-
-def probe_codec(file_path: str) -> Optional[str]:
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
-             "-select_streams", "a:0", "-show_streams", file_path],
-            capture_output=True, text=True,
-        )
-        streams = json.loads(probe.stdout).get("streams", [])
-        if streams:
-            return streams[0].get("codec_name")
-    except Exception as e:
-        print(f"[processor] Codec probe failed: {e}")
-    return None
+# Duration used to come from an ffprobe subprocess here, mirroring the
+# audio worker. That was wrong for this worker: the audio worker handles
+# one track per job and genuinely needs duration independently, while
+# this one processes hundreds of files and already calls librosa.load on
+# every new sample — which yields duration for free as len(y) / sr.
+#
+# So the probe was 185 subprocess spawns per job producing a number we
+# were about to compute anyway. Duration validation now happens after
+# the load instead (see process_drumkit_job), using the decoded audio.
+#
+# The tradeoff: an over-length file now gets fully decoded before being
+# rejected, rather than caught by a cheap pre-check. That's acceptable
+# because the client already validates duration before upload — a file
+# reaching the worker has passed that check, so the worker's version is
+# a backstop against a modified client, not an expected-path filter.
+# Paying a decode on a rare bad file beats paying a subprocess spawn on
+# every legitimate one.
+#
+# probe_codec was also removed — it was written but never called.
 
 
 def generate_waveform_peaks(y: np.ndarray, num_points: int = WAVEFORM_NUM_POINTS) -> list:
@@ -430,12 +421,8 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
                 delete_from_r2(staging_key)
                 continue
 
-            duration = probe_duration(local_path)
-            if duration is None or duration > MAX_DURATION_SECONDS:
-                print(f"[processor] Rejected (duration): {filename} ({duration}s)")
-                delete_from_r2(staging_key)
-                continue
-
+            # Size is still checked up front — it's free (a stat call, no
+            # decode) and rejects oversized files before any real work.
             if os.path.getsize(local_path) > MAX_FILE_SIZE_BYTES:
                 print(f"[processor] Rejected (size): {filename}")
                 delete_from_r2(staging_key)
@@ -468,6 +455,15 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
                     continue
 
                 features = extract_features(y, sr)
+
+                # Duration check moved here, using the audio that's
+                # already decoded rather than a separate ffprobe pass.
+                # extract_features computes it as len(y) / sr.
+                if features["duration"] > MAX_DURATION_SECONDS:
+                    print(f"[processor] Rejected (duration): {filename} ({features['duration']:.1f}s)")
+                    delete_from_r2(staging_key)
+                    continue
+
                 category, confidence, source = categorize_file(relative_path, filename, features, keyword_map)
 
                 # Backfill signal — Tier 3 catching what keywords missed.
