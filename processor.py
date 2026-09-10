@@ -209,15 +209,44 @@ def _fuzzy_match(token: str, keyword: str) -> bool:
 
 def match_category_by_keywords(text: str, keyword_map: dict) -> Optional[str]:
     """
-    Tokenizes the input, then checks each token against every known
-    keyword — exact match first (cheap, no false-positive risk),
-    fuzzy match second (catches abbreviations/typos exact matching
-    misses). Returns the first category with any matching token.
+    Returns the best-matching category, not the first one found.
+
+    Three passes, strongest signal first:
+      1. raw substring — catches keywords embedded in longer names
+         ("My 808 Collection", "808bass", "the808s"). Longest keyword
+         wins, so "808" doesn't beat a more specific match.
+      2. exact token match
+      3. fuzzy token match (abbreviations, typos)
+
+    Previously this returned the first category whose keyword matched
+    anything, and dict order comes from however Supabase returned the
+    rows — so a file matching both "kick" and "808" got whichever
+    category happened to load first, non-deterministically.
     """
+    lowered = text.lower()
     tokens = _tokenize(text)
+
+    # Pass 1: substring, longest keyword wins.
+    best_category = None
+    best_length = 0
+    for category, keywords in keyword_map.items():
+        for kw in keywords:
+            if kw in lowered and len(kw) > best_length:
+                best_category = category
+                best_length = len(kw)
+    if best_category:
+        return best_category
+
     if not tokens:
         return None
 
+    # Pass 2: exact token match.
+    for category, keywords in keyword_map.items():
+        for token in tokens:
+            if token in keywords:
+                return category
+
+    # Pass 3: fuzzy token match.
     for category, keywords in keyword_map.items():
         for token in tokens:
             for kw in keywords:
@@ -509,7 +538,7 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
             # ── Hash — worker's own, not the client's claim ───────────────
             real_hash = compute_sha256(local_path)
 
-            existing = supabase.table("samples").select("id, category, fingerprint, category_confidence").eq("hash", real_hash).execute()
+            existing = supabase.table("samples").select("id, category, fingerprint, category_confidence, category_source").eq("hash", real_hash).execute()
 
             if existing.data:
                 # Already-owned-somewhere-on-the-platform sound. No new
@@ -518,6 +547,28 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
                 sample_id = sample["id"]
                 duplicate_files_count += 1
                 print(f"[processor] Hash match, referencing existing sample: {real_hash[:12]}")
+
+                # Re-run keyword categorization when the stored value came
+                # from the Tier 3 audio fallback. Those rows were assigned
+                # without a keyword match — either because the keyword list
+                # has grown since, or because an older matcher missed it —
+                # and this placement's folder/filename may resolve cleanly
+                # now. Keyword matching only: no decode, no fingerprint, so
+                # this costs nothing beyond the map lookup already in memory.
+                if sample.get("category_source") == "tier3_audio":
+                    folder_path = os.path.dirname(relative_path)
+                    recat = (
+                        match_category_by_keywords(folder_path, keyword_map)
+                        or match_category_by_keywords(filename, keyword_map)
+                    )
+                    if recat and recat != sample.get("category"):
+                        source = "tier1_folder" if match_category_by_keywords(folder_path, keyword_map) else "tier2_filename"
+                        supabase.table("samples").update({
+                            "category": recat,
+                            "category_confidence": "confident",
+                            "category_source": source,
+                        }).eq("id", sample_id).execute()
+                        print(f"[processor] Recategorized {filename}: {sample.get('category')} -> {recat}")
 
                 supabase.table("samples").update({
                     "reference_count": supabase.table("samples").select("reference_count").eq("id", sample_id).single().execute().data["reference_count"] + 1
