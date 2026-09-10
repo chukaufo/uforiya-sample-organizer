@@ -175,16 +175,19 @@ from difflib import SequenceMatcher
 
 def _tokenize(text: str) -> list:
     """
-    Splits a filename/folder string into individual tokens on common
-    naming delimiters (underscore, hyphen, space, digit runs) so
-    matching compares whole words rather than searching for a keyword
-    as a raw substring anywhere in the string. This alone catches
-    more real-world naming (e.g. "Vintage_Kick_v2" tokenizes to
-    ["vintage", "kick", "v2"], matching "kick" cleanly) without any
-    fuzzy logic yet.
+    Extracts alphanumeric runs, splitting on everything else (spaces,
+    underscores, hyphens, brackets, parens, periods, etc.).
+
+    Digits must stay part of their run rather than act as a delimiter.
+    The previous version split on [_\-\s\d]+, treating digit runs
+    themselves as separators — "808 [100]" tokenized to ['[', ']'],
+    "808s" tokenized to ['s']. Any purely-numeric keyword like "808"
+    became permanently unmatchable, so Tier 1/2 silently failed on
+    every 808 folder/filename and fell through to the Tier 3 audio
+    heuristic instead — which is why some landed in "Kicks" and others
+    in "Other" despite an identical folder name.
     """
-    tokens = re.split(r'[_\-\s\d]+', text.lower())
-    return [t for t in tokens if t]
+    return re.findall(r'[a-z0-9]+', text.lower())
 
 
 def _fuzzy_match(token: str, keyword: str) -> bool:
