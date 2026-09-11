@@ -285,15 +285,34 @@ def classify_tier3(features: dict) -> Optional[str]:
     return None  # stays unsure — Tier 3 didn't produce a confident guess
 
 
+def _match_folder_chain(relative_path: str, keyword_map: dict) -> Optional[str]:
+    """
+    Resolves a category from the folder chain, nearest ancestor first.
+
+    Matching the whole path at once is wrong: "Open Hats & Crashes/Crash"
+    contains both "open hat" (8 chars) and "crash" (5), and the
+    longest-keyword rule handed every file in Crash/ to Open Hats. The
+    immediate parent is the most specific statement about what a file
+    is, so it decides; only if it says nothing do we ask its parent.
+    """
+    folder_path = os.path.dirname(relative_path)
+    if not folder_path or folder_path == ".":
+        return None
+
+    for part in reversed([p for p in folder_path.split("/") if p]):
+        match = match_category_by_keywords(part, keyword_map)
+        if match:
+            return match
+    return None
+
+
 def categorize_file(relative_path: str, filename: str, features: dict, keyword_map: dict) -> tuple:
     """
     Returns (category, confidence, source). Runs the tiers in order,
     independent of whatever the client/backend already guessed —
     cheap to redo, and this is what actually gets written to samples.
     """
-    folder_path = os.path.dirname(relative_path)
-
-    tier1 = match_category_by_keywords(folder_path, keyword_map)
+    tier1 = _match_folder_chain(relative_path, keyword_map)
     if tier1:
         return tier1, "confident", "tier1_folder"
 
@@ -563,13 +582,10 @@ def process_drumkit_job(job_id: str, user_id: str, drum_kit_id: str, files: list
                 # now. Keyword matching only: no decode, no fingerprint, so
                 # this costs nothing beyond the map lookup already in memory.
                 if sample.get("category_source") == "tier3_audio":
-                    folder_path = os.path.dirname(relative_path)
-                    recat = (
-                        match_category_by_keywords(folder_path, keyword_map)
-                        or match_category_by_keywords(filename, keyword_map)
-                    )
+                    folder_match = _match_folder_chain(relative_path, keyword_map)
+                    recat = folder_match or match_category_by_keywords(filename, keyword_map)
                     if recat and recat != sample.get("category"):
-                        source = "tier1_folder" if match_category_by_keywords(folder_path, keyword_map) else "tier2_filename"
+                        source = "tier1_folder" if folder_match else "tier2_filename"
                         supabase.table("samples").update({
                             "category": recat,
                             "category_confidence": "confident",
