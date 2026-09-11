@@ -18,7 +18,14 @@ from notifier import notify_user, email_admin
 # ── Constants — tune these as real usage data comes in ───────────────────────
 
 MAX_DURATION_SECONDS = 90
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
+# 15MB. A 24-bit/44.1kHz stereo WAV runs ~265KB per second, so this
+# still clears any legitimate one-shot (typically under 500KB) or a
+# long 808 tail, and leaves room for 32-bit/96kHz files. The old 50MB
+# ceiling allowed roughly three minutes of uncompressed stereo — a
+# song, not a sample — and did no filtering the 90s duration cap
+# wasn't already doing.
+# MUST match MAX_FILE_SIZE_BYTES in the web app's drumkit-client.ts.
+MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15MB
 ALLOWED_EXTENSIONS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
 # Near-dupe detection is DISABLED. Exact-hash dedup (the primary
 # mechanism) works perfectly and is untouched — this only turns off the
