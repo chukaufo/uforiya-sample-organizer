@@ -1,11 +1,3 @@
 fastapi
 uvicorn[standard]
-boto3
-librosa
 numpy
-ffmpeg-python
-requests
-supabase
-mutagen
-python-dotenv
-httpx
