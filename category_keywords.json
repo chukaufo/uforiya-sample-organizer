@@ -1,0 +1,14 @@
+{
+  "Kicks":   ["kick", "kck", "bd", "bassdrum", "bass drum"],
+  "Snares":  ["snare", "snr", "sd", "rim", "rimshot"],
+  "Claps":   ["clap", "clp", "handclap", "hand clap"],
+  "Hats":    ["hat", "hihat", "hi hat", "hi-hat", "open hat", "closed hat", "oh", "ch"],
+  "Cymbals": ["crash", "ride", "cymbal", "splash", "china"],
+  "808s":    ["808", "sub", "subbass", "sub bass"],
+  "Percs":   ["perc", "percussion", "conga", "bongo", "shaker", "tamb", "tambourine", "triangle", "cowbell", "block"],
+  "Toms":    ["tom", "floor tom", "rack tom"],
+  "FX":      ["fx", "riser", "downlifter", "uplifter", "impact", "whoosh", "reverse", "transition"],
+  "Vocals":  ["vox", "vocal", "adlib", "ad lib", "chant"],
+  "Loops":   ["loop", "melody", "melodic", "bpm"],
+  "Bass":    ["bass", "reese", "growl"]
+}
