@@ -10,12 +10,14 @@ import json
 import os
 import sys
 import threading
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import db
+import duplicates
 import jobs
 import scanner
 from platform_paths import normalize_path
@@ -242,7 +244,40 @@ def cancel_job(job_id: str):
     job.cancel()
     return {"job_id": job_id, "state": job.state, "cancelled": True}
 
+# ── Duplicates ───────────────────────────────────────────────────────────────
 
+@app.get("/duplicates", dependencies=[Depends(require_token)])
+def get_duplicates(
+    page: int = 1,
+    page_size: int = duplicates.DEFAULT_PAGE_SIZE,
+    match_type: Optional[str] = None,
+):
+    """Duplicate groups, biggest reclaimable first, paged."""
+    return duplicates.list_groups(page=page, page_size=page_size, match_type=match_type)
+
+
+@app.get("/duplicates/totals", dependencies=[Depends(require_token)])
+def get_duplicate_totals():
+    """Headline numbers — groups, removable files, bytes reclaimable.
+
+    Declared before the {group_id} route because FastAPI matches in
+    declaration order, and 'totals' would otherwise be swallowed as a
+    group id."""
+    return duplicates.totals()
+
+
+@app.get("/duplicates/{group_id}", dependencies=[Depends(require_token)])
+def get_duplicate_group(group_id: str):
+    """One group, every copy, with a keep suggestion."""
+    try:
+        group = duplicates.get_group(group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found or no longer duplicated")
+    return group
+    
 # ── Stats ────────────────────────────────────────────────────────────────────
 
 @app.get("/library/stats", dependencies=[Depends(require_token)])

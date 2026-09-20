@@ -1,4 +1,4 @@
-#!/Users/chukauwefoh/uf0/uforiya-drums-worker/.venv/bin/python3.11
+#!/Users/chukauwefoh/uf0/uforiya-sample-organizer/.venv/bin/python3.11
 # -*- coding: utf-8 -*-
 import re
 import sys
