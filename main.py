@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import threading
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import db
 import duplicates
 import jobs
+import quarantine
 import scanner
 from platform_paths import normalize_path
 
@@ -70,6 +71,9 @@ def require_token_sse(token: str = Query(...)) -> None:
 
 class AddRootRequest(BaseModel):
     path: str
+
+class QuarantineRequest(BaseModel):
+    file_ids: List[int]
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -277,6 +281,54 @@ def get_duplicate_group(group_id: str):
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found or no longer duplicated")
     return group
+    
+
+# ── Quarantine ───────────────────────────────────────────────────────────────
+
+@app.post("/quarantine", dependencies=[Depends(require_token)])
+def post_quarantine(body: QuarantineRequest):
+    """
+    Moves approved files into a new quarantine batch.
+
+    A 400 means nothing moved — the guards run before any file is
+    touched. A 200 with a non-empty failures list means the batch was
+    created and some files could not be moved; those stay where they
+    are.
+    """
+    try:
+        return quarantine.quarantine_files(body.file_ids)
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/quarantine", dependencies=[Depends(require_token)])
+def get_quarantine():
+    return {"batches": quarantine.list_batches()}
+
+
+@app.get("/quarantine/{batch_id}", dependencies=[Depends(require_token)])
+def get_quarantine_batch(batch_id: int):
+    batch = quarantine.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return batch
+
+
+@app.post("/quarantine/{batch_id}/restore", dependencies=[Depends(require_token)])
+def post_restore(batch_id: int):
+    try:
+        return quarantine.restore_batch(batch_id)
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/quarantine/{batch_id}", dependencies=[Depends(require_token)])
+def delete_quarantine_batch(batch_id: int):
+    """Permanent deletion. Deliberate second action, never automatic."""
+    try:
+        return quarantine.purge_batch(batch_id)
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     
 # ── Stats ────────────────────────────────────────────────────────────────────
 

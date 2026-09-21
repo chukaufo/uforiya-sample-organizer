@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS quarantine_batches (
 CREATE TABLE IF NOT EXISTS quarantine_items (
   id              INTEGER PRIMARY KEY,
   batch_id        INTEGER NOT NULL REFERENCES quarantine_batches(id),
+  file_id         INTEGER NOT NULL,
   original_path   TEXT NOT NULL,
   quarantine_path TEXT NOT NULL,
   sha256          TEXT,
