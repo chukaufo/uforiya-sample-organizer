@@ -1,0 +1,39 @@
+{
+  "name": "uforiya-sample-organizer",
+  "version": "0.1.0",
+  "description": "Finds duplicate samples across a producer's drum kit library",
+  "main": "electron/main.js",
+  "author": "Chuka Uwefoh",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.uforiya.sampleorganizer",
+    "productName": "Uforiya Sample Organizer",
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/worker",
+        "to": "worker"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "UforiyaSampleOrganizer-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.music"
+    }
+  }
+}

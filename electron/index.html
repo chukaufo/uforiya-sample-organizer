@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src http://127.0.0.1:*; media-src http://127.0.0.1:*">
+<title>Uforiya Sample Organizer</title>
+<style>
+  :root {
+    --bg: #08080f;
+    --panel: #10101c;
+    --line: #1e1e2e;
+    --text: #e8e8f0;
+    --dim: #8a8aa0;
+    --accent: #7b5ff5;
+    --accent-lit: #9b7ff7;
+    --error: #ff4d4d;
+    --good: #5fd38d;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .brand { font-weight: 600; letter-spacing: -0.2px; }
+  .brand span { color: var(--accent-lit); }
+  .spacer { flex: 1; }
+
+  button {
+    font: inherit;
+    font-weight: 500;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text);
+    padding: 7px 14px;
+    border-radius: 9px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button.primary:hover:not(:disabled) { background: var(--accent-lit); }
+  button.danger { color: var(--error); }
+  button.small { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
+
+  main { flex: 1; overflow-y: auto; padding: 24px; }
+
+  .center {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+  }
+  .center p { color: var(--dim); max-width: 380px; margin: 0; }
+
+  .stats {
+    display: flex;
+    gap: 40px;
+    padding: 18px 22px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    margin-bottom: 20px;
+  }
+  .stat-value { font-size: 24px; font-weight: 600; letter-spacing: -0.5px; }
+  .stat-label { color: var(--dim); font-size: 12px; }
+  .stat-of { color: var(--dim); font-size: 12px; margin-top: 2px; }
+
+  .group {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .group-head {
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    cursor: pointer;
+    background: var(--panel);
+  }
+  .group-head:hover { background: #151524; }
+  .chevron { color: var(--dim); font-size: 11px; width: 10px; }
+  .group.open .chevron { transform: rotate(90deg); }
+  .reclaim { font-weight: 600; min-width: 90px; }
+  .badge {
+    font-size: 11px;
+    color: var(--dim);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 9px;
+  }
+  .badge.reenc { color: var(--accent-lit); border-color: var(--accent); }
+
+  .files { display: none; }
+  .group.open .files { display: block; }
+
+  .file {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 16px 10px 40px;
+    border-top: 1px solid var(--line);
+  }
+  .file input[type=checkbox] {
+    margin-top: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 15px;
+    height: 15px;
+  }
+  .play {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 999px;
+    font-size: 10px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .play.playing { background: var(--accent); border-color: var(--accent); }
+  .file-main { flex: 1; min-width: 0; }
+  .file-name { word-break: break-all; }
+  .file-path {
+    color: var(--dim);
+    font-size: 11px;
+    font-family: ui-monospace, "JetBrains Mono", monospace;
+    word-break: break-all;
+    user-select: text;
+  }
+  .keep { color: var(--good); font-size: 11px; font-weight: 600; }
+
+  .bar {
+    padding: 12px 24px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-shrink: 0;
+    background: var(--panel);
+  }
+
+  .progress {
+    height: 3px;
+    background: var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    flex: 1;
+  }
+  .progress div { height: 100%; background: var(--accent); width: 0; }
+
+  .mono {
+    font-family: ui-monospace, "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+  }
+
+  .batch {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--panel);
+  }
+
+  .error {
+    background: #2a1116;
+    border: 1px solid var(--error);
+    color: #ffb3b3;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+  }
+    .actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .hint { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">Uforiya <span>Sample Organizer</span></div>
+  <div class="spacer"></div>
+  <button id="btn-quarantine-view">Quarantine</button>
+  <button id="btn-rescan">Rescan</button>
+  <button id="btn-add" class="primary">Add folder</button>
+</header>
+
+<main id="main"></main>
+
+<div class="bar" id="bar" style="display:none">
+  <span id="phase" style="min-width:80px"></span>
+  <div class="progress"><div id="progress-fill"></div></div>
+  <span class="mono" id="current-path"></span>
+  <button id="btn-cancel">Cancel</button>
+</div>
+
+<div class="bar" id="action-bar" style="display:none">
+  <span id="selection-count"></span>
+  <div class="spacer"></div>
+  <button id="btn-clear">Clear selection</button>
+  <button id="btn-remove" class="primary">Move to quarantine</button>
+</div>
+
+<script>
+// Renderer: displays what the worker decides, and sends commands back.
+//
+// It holds selection state, playback state, and which groups are open.
+// Nothing else. Every question about which files are duplicates, what is
+// safe to remove, and where files go is answered by the worker — which is
+// why a bug in here cannot lose a producer a sample.
+
+let API = null;
+let TOKEN = null;
+let AUTH = null;
+
+const selected = new Set();   // file ids ticked for removal
+const openGroups = new Set(); // group ids expanded, so a redraw keeps them
+const groupFiles = new Map(); // group id -> files, cached after first open
+let groups = [];
+let totals = null;
+let view = 'library';
+
+// One sound at a time. A producer comparing two copies wants to hear one
+// then the other, not both at once.
+let audio = null;
+let playingId = null;
+
+const el = (id) => document.getElementById(id);
+const main = el('main');
+
+
+// ── Worker calls ────────────────────────────────────────────────────────────
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    ...options,
+    headers: {
+      Authorization: AUTH,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.detail || 'Request failed');
+  return body;
+}
+
+function bytes(n) {
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+const count = (n) => n.toLocaleString();
+
+async function groupDetail(groupId) {
+  if (groupFiles.has(groupId)) return groupFiles.get(groupId);
+  const detail = await api('/duplicates/' + encodeURIComponent(groupId));
+  groupFiles.set(groupId, detail.files);
+  return detail.files;
+}
+
+
+// ── Playback ────────────────────────────────────────────────────────────────
+
+function stopAudio() {
+  if (audio) {
+    audio.pause();
+    audio = null;
+  }
+  playingId = null;
+  document.querySelectorAll('.play.playing').forEach((b) => {
+    b.classList.remove('playing');
+    b.textContent = '▶';
+  });
+}
+
+function togglePlay(fileId, button) {
+  if (playingId === fileId) {
+    stopAudio();
+    return;
+  }
+  stopAudio();
+
+  // Token in the query string: an <audio> element cannot set request
+  // headers, same constraint as EventSource.
+  audio = new Audio(`${API}/audio/${fileId}?token=${encodeURIComponent(TOKEN)}`);
+  playingId = fileId;
+  button.classList.add('playing');
+  button.textContent = '■';
+
+  audio.onended = stopAudio;
+  audio.onerror = () => {
+    stopAudio();
+    showError('That file could not be played.');
+  };
+  audio.play().catch(() => {
+    stopAudio();
+    showError('That file could not be played.');
+  });
+}
+
+
+// ── Scanning ────────────────────────────────────────────────────────────────
+
+function watchJob(jobId) {
+  el('bar').style.display = 'flex';
+  el('action-bar').style.display = 'none';
+
+  const stream = new EventSource(
+    `${API}/jobs/${jobId}/events?token=${encodeURIComponent(TOKEN)}`
+  );
+
+  stream.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    if (['completed', 'cancelled', 'failed'].includes(data.phase)) {
+      stream.close();
+      el('bar').style.display = 'none';
+      if (data.phase === 'failed') showError(data.error);
+      // The index changed, so cached group contents are stale.
+      groupFiles.clear();
+      loadLibrary();
+      return;
+    }
+
+    el('phase').textContent = data.phase;
+    el('current-path').textContent = data.current_path || '';
+    const pct = data.total ? (data.done / data.total) * 100 : 0;
+    el('progress-fill').style.width = pct + '%';
+  };
+
+  stream.onerror = () => {
+    stream.close();
+    el('bar').style.display = 'none';
+    loadLibrary();
+  };
+
+  el('btn-cancel').onclick = () => api(`/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
+
+// ── Library view ────────────────────────────────────────────────────────────
+
+function showError(message) {
+  const div = document.createElement('div');
+  div.className = 'error';
+  div.textContent = message;
+  main.prepend(div);
+  setTimeout(() => div.remove(), 8000);
+}
+
+async function loadLibrary() {
+  view = 'library';
+  el('btn-quarantine-view').textContent = 'Quarantine';
+
+  const roots = await api('/library/roots');
+
+  if (roots.roots.length === 0) {
+    main.innerHTML = `
+      <div class="center">
+        <div style="font-size:18px;font-weight:600">No library yet</div>
+        <p>Add the folder where your drum kits live. Nothing is moved or
+           deleted without your say-so.</p>
+      </div>`;
+    el('action-bar').style.display = 'none';
+    return;
+  }
+
+  totals = await api('/duplicates/totals');
+  const page = await api('/duplicates?page_size=200');
+  groups = page.groups;
+
+  if (totals.groups === 0) {
+    main.innerHTML = `
+      <div class="center">
+        <div style="font-size:18px;font-weight:600">No duplicates found</div>
+        <p>All ${count(totals.total_files)} samples in your library are unique.</p>
+      </div>`;
+    el('action-bar').style.display = 'none';
+    return;
+  }
+
+  // Every figure is shown against the library's own total. A count with no
+  // scale tells a producer nothing: 568 files means one thing in a library
+  // of 600 and something else entirely in a library of 5,000.
+  main.innerHTML = `
+    <div class="stats">
+      <div>
+        <div class="stat-value">${bytes(totals.reclaimable_bytes)}</div>
+        <div class="stat-label">reclaimable</div>
+        <div class="stat-of">of ${bytes(totals.total_bytes)}</div>
+      </div>
+      <div>
+        <div class="stat-value">${count(totals.removable_files)}</div>
+        <div class="stat-label">files removable</div>
+        <div class="stat-of">of ${count(totals.total_files)}</div>
+      </div>
+      <div>
+        <div class="stat-value">${count(totals.groups)}</div>
+        <div class="stat-label">duplicate groups</div>
+      </div>
+    </div>
+      <div class="actions">
+      <button id="btn-keep-one" class="primary">Keep one of each</button>
+      <span class="hint">Selects every extra copy. One of each sample stays.</span>
+    </div>
+    <div id="group-list"></div>`;
+
+  el('btn-keep-one').onclick = keepOneOfEach;
+
+  const list = el('group-list');
+  groups.forEach((group) => list.appendChild(renderGroup(group)));
+  updateActionBar();
+}
+
+function renderGroup(group) {
+  const node = document.createElement('div');
+  node.className = 'group';
+  node.innerHTML = `
+    <div class="group-head">
+      <span class="chevron">▶</span>
+      <span class="reclaim">${bytes(group.reclaimable_bytes)}</span>
+      <span>${group.copies} copies</span>
+      <span class="spacer"></span>
+      <button class="small keep-one">Keep one</button>
+      <span class="badge ${group.match_type === 'exact' ? '' : 'reenc'}">
+        ${group.match_type}
+      </span>
+    </div>
+    <div class="files"></div>`;
+
+  const box = node.querySelector('.files');
+
+  async function fill() {
+    box.innerHTML = '';
+    const files = await groupDetail(group.group_id);
+    files.forEach((file) => box.appendChild(renderFile(file)));
+  }
+
+  node.querySelector('.group-head').onclick = async (event) => {
+    if (event.target.closest('.keep-one')) return;
+    const open = node.classList.toggle('open');
+    open ? openGroups.add(group.group_id) : openGroups.delete(group.group_id);
+    if (open) await fill();
+  };
+
+  // Per-group version of the header button, for when a producer wants to
+  // decide one sound at a time rather than trust the whole library at once.
+  node.querySelector('.keep-one').onclick = async (event) => {
+    event.stopPropagation();
+    const files = await groupDetail(group.group_id);
+    files.forEach((f) => { if (!f.suggested_keep) selected.add(f.file_id); });
+    if (node.classList.contains('open')) await fill();
+    updateActionBar();
+  };
+
+  if (openGroups.has(group.group_id)) {
+    node.classList.add('open');
+    fill();
+  }
+
+  return node;
+}
+
+function renderFile(file) {
+  const row = document.createElement('div');
+  row.className = 'file';
+
+  const tick = document.createElement('input');
+  tick.type = 'checkbox';
+  tick.checked = selected.has(file.file_id);
+  // A tick is a proposal, never an instruction. The worker refuses any
+  // selection that would leave a sample with zero copies, whatever this
+  // page sends it.
+  tick.onchange = () => {
+    tick.checked ? selected.add(file.file_id) : selected.delete(file.file_id);
+    updateActionBar();
+  };
+
+  const play = document.createElement('button');
+  play.className = 'play' + (playingId === file.file_id ? ' playing' : '');
+  play.textContent = playingId === file.file_id ? '■' : '▶';
+  play.title = 'Listen before you remove it';
+  play.onclick = () => togglePlay(file.file_id, play);
+
+  const body = document.createElement('div');
+  body.className = 'file-main';
+  body.innerHTML = `
+    <div class="file-name">${escapeHtml(file.filename)}
+      ${file.suggested_keep ? '<span class="keep">KEEP</span>' : ''}</div>
+    <div class="file-path">${escapeHtml(file.path)}</div>`;
+
+  row.appendChild(tick);
+  row.appendChild(play);
+  row.appendChild(body);
+  return row;
+}
+
+
+// ── Quarantine view ─────────────────────────────────────────────────────────
+
+async function loadQuarantine() {
+  view = 'quarantine';
+  el('btn-quarantine-view').textContent = 'Back to library';
+  el('action-bar').style.display = 'none';
+  stopAudio();
+
+  const data = await api('/quarantine');
+  const live = data.batches.filter((b) => !b.purged_at && b.file_count > 0);
+
+  if (live.length === 0) {
+    main.innerHTML = `
+      <div class="center">
+        <div style="font-size:18px;font-weight:600">Quarantine is empty</div>
+        <p>Files you remove are staged here first, and can be put back.</p>
+      </div>`;
+    return;
+  }
+
+  main.innerHTML = '<div id="batch-list"></div>';
+  const list = el('batch-list');
+
+  live.forEach((batch) => {
+    const when = new Date(batch.created_at * 1000).toLocaleString();
+    const node = document.createElement('div');
+    node.className = 'batch';
+    node.innerHTML = `
+      <div style="flex:1">
+        <div>${count(batch.file_count)} files &middot; ${bytes(batch.bytes)}</div>
+        <div class="stat-label">${when}</div>
+      </div>`;
+
+    const restore = document.createElement('button');
+    restore.textContent = 'Put back';
+    restore.onclick = async () => {
+      try {
+        await api(`/quarantine/${batch.id}/restore`, { method: 'POST' });
+        groupFiles.clear();
+        loadQuarantine();
+      } catch (err) { showError(err.message); }
+    };
+
+    // The only destructive action in the app, and deliberately a separate
+    // second step the producer takes on purpose.
+    const purge = document.createElement('button');
+    purge.className = 'danger';
+    purge.textContent = 'Delete permanently';
+    purge.onclick = async () => {
+      if (!confirm(
+        `Permanently delete ${batch.file_count} file(s)?\n\n` +
+        `This frees ${bytes(batch.bytes)} and cannot be undone.`
+      )) return;
+      try {
+        await api(`/quarantine/${batch.id}`, { method: 'DELETE' });
+        loadQuarantine();
+      } catch (err) { showError(err.message); }
+    };
+
+    node.appendChild(restore);
+    node.appendChild(purge);
+    list.appendChild(node);
+  });
+}
+
+
+// ── Selection ───────────────────────────────────────────────────────────────
+
+function updateActionBar() {
+  const bar = el('action-bar');
+  if (view !== 'library' || selected.size === 0) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  el('selection-count').textContent =
+    `${count(selected.size)} file${selected.size === 1 ? '' : 's'} selected`;
+}
+
+function escapeHtml(value) {
+  const div = document.createElement('div');
+  div.textContent = value;
+  return div.innerHTML;
+}
+
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+
+el('btn-add').onclick = async () => {
+  const folder = await window.uforiya.pickFolder();
+  if (!folder) return;
+  try {
+    const result = await api('/library/roots', {
+      method: 'POST',
+      body: JSON.stringify({ path: folder }),
+    });
+    watchJob(result.job_id);
+  } catch (err) { showError(err.message); }
+};
+
+el('btn-rescan').onclick = async () => {
+  stopAudio();
+  const result = await api('/scan', { method: 'POST' });
+  watchJob(result.job_id);
+};
+
+el('btn-quarantine-view').onclick = () => {
+  view === 'quarantine' ? loadLibrary() : loadQuarantine();
+};
+
+el('btn-clear').onclick = async () => {
+  selected.clear();
+  await loadLibrary();
+};
+
+// Ticks every copy except the one the worker suggests keeping, across the
+// whole library. The wording says what happens to the samples rather than
+// what happens to the checkboxes — a producer cares that one of each
+// survives, not that 568 rows got selected.
+async function keepOneOfEach() {
+  if (!totals) return;
+  if (!confirm(
+    `Select ${count(totals.removable_files)} extra copies for removal?\n\n` +
+    `One copy of every sample stays where it is. ` +
+    `Nothing moves until you choose to move it.`
+  )) return;
+
+  for (const group of groups) {
+    const files = await groupDetail(group.group_id);
+    files.forEach((f) => { if (!f.suggested_keep) selected.add(f.file_id); });
+  }
+
+  // Redraw so already-open groups show their new ticks.
+  await loadLibrary();
+}
+
+el('btn-remove').onclick = async () => {
+  const ids = [...selected];
+  if (!confirm(
+    `Move ${count(ids.length)} file(s) to quarantine?\n\n` +
+    `They leave your library but are not deleted — you can put them back.`
+  )) return;
+
+  stopAudio();
+  try {
+    const result = await api('/quarantine', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: ids }),
+    });
+    selected.clear();
+    groupFiles.clear();
+    if (result.failures.length) {
+      showError(`${result.failures.length} file(s) could not be moved.`);
+    }
+    // A scan reconciles the index with what is now on disk.
+    const scan = await api('/scan', { method: 'POST' });
+    watchJob(scan.job_id);
+  } catch (err) { showError(err.message); }
+};
+
+
+// ── Start ───────────────────────────────────────────────────────────────────
+
+(async () => {
+  const info = await window.uforiya.getWorkerInfo();
+  API = `http://127.0.0.1:${info.port}`;
+  TOKEN = info.token;
+  AUTH = `Bearer ${info.token}`;
+
+  await loadLibrary();
+
+  // A rescan on launch costs almost nothing when nothing has changed, and
+  // means the list reflects what is actually on disk rather than what was
+  // there last session.
+  const roots = await api('/library/roots');
+  if (roots.roots.length > 0) {
+    const scan = await api('/scan', { method: 'POST' });
+    watchJob(scan.job_id);
+  }
+})();
+</script>
+</body>
+</html>

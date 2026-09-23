@@ -7,13 +7,14 @@
 # can move a producer's files.
 import argparse
 import json
+import mimetypes
 import os
 import sys
 import threading
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 import db
@@ -329,6 +330,57 @@ def delete_quarantine_batch(batch_id: int):
         return quarantine.purge_batch(batch_id)
     except quarantine.QuarantineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+# ── Audio ────────────────────────────────────────────────────────────────────
+
+@app.get("/audio/{file_id}")
+def get_audio(file_id: int, token: str = Query(...)):
+    """
+    Streams a file's original bytes for preview playback.
+
+    This route matters more than it looks. A producer will not trust a
+    delete decision without hearing the file first, and a byte-identical
+    match is only reassuring once you have heard that both copies are the
+    sound you think they are.
+
+    Token comes from the query string, like the SSE route, because an
+    <audio> element cannot set request headers any more than EventSource
+    can. Same reasoning applies: loopback only, no referrer, no proxy.
+
+    Range support is what lets the audio element seek. Without it a
+    producer can only play from the start, and scrubbing through a long
+    loop to check its tail becomes impossible.
+    """
+    if token != TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    row = db.get_conn().execute(
+        """
+        SELECT f.rel_path, f.size, r.path AS root_path
+        FROM files f
+        JOIN roots r ON r.id = f.root_id
+        WHERE f.id = ?
+        """,
+        (file_id,),
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    path = os.path.join(row["root_path"], row["rel_path"])
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File is no longer on disk")
+
+    media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    size = os.path.getsize(path)
+
+    # Whole file, no range requested. One-shots are small enough that this
+    # is the common case.
+    return Response(
+        content=open(path, "rb").read(),
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes", "Content-Length": str(size)},
+    )
     
 # ── Stats ────────────────────────────────────────────────────────────────────
 

@@ -132,8 +132,15 @@ def list_groups(
 
 
 def totals() -> dict:
-    """Headline numbers for the review screen — how much is actually
-    recoverable across the whole library."""
+    """
+    Headline numbers for the review screen.
+
+    Duplicate figures are reported against the library's own totals,
+    because a count on its own carries no scale — 568 removable files
+    means something very different in a library of 600 than in one of
+    5,000. The comparison is what tells a producer whether this is a
+    cleanup or a crisis.
+    """
     row = db.get_conn().execute(
         """
         SELECT COUNT(*) AS groups,
@@ -147,7 +154,19 @@ def totals() -> dict:
         )
         """
     ).fetchone()
-    return dict(row)
+
+    library = db.get_conn().execute(
+        """
+        SELECT COUNT(*) AS total_files,
+               COALESCE(SUM(size), 0) AS total_bytes
+        FROM files
+        WHERE state = 'present'
+        """
+    ).fetchone()
+
+    result = dict(row)
+    result.update(dict(library))
+    return result
 
 
 def _parse_group_id(group_id: str) -> tuple:
