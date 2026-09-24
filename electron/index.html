@@ -106,7 +106,7 @@
   .group-head:hover { background: #151524; }
   .chevron { color: var(--dim); font-size: 11px; width: 10px; }
   .group.open .chevron { transform: rotate(90deg); }
-  .reclaim { font-weight: 600; min-width: 90px; }
+  .reclaim { font-weight: 600; min-width: 160px; }
   .badge {
     font-size: 11px;
     color: var(--dim);
@@ -204,23 +204,159 @@
     padding: 12px 16px;
     margin-bottom: 16px;
   }
-    .actions {
+  .actions {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 14px;
     margin-bottom: 20px;
   }
   .hint { color: var(--dim); font-size: 12px; }
-</style>
+
+  /* A full-width bar the work reports into, so a producer is never left
+     watching a frozen window wondering whether 400 files are moving. */
+  .working {
+    position: fixed;
+    inset: 0;
+    z-index: 3;
+    background: rgba(8, 8, 15, 0.82);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .working-label { font-weight: 600; }
+  .working-detail { color: var(--dim); font-size: 12px; }
+  .working-track {
+    width: 320px;
+    height: 3px;
+    background: var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .working-track div { height: 100%; background: var(--accent); width: 0; }
+
+  #btn-more {
+    display: block;
+    margin: 4px auto 0;
+  }
+
+  /* Icon inside the control's own border, so the arrows read as part of
+     the dropdown rather than a button sitting beside it. */
+  .sort {
+    display: flex;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding-left: 10px;
+  }
+  .sort:focus-within { border-color: var(--accent); }
+  .sort-icon { color: var(--dim); font-size: 14px; line-height: 1; }
+  .sort select {
+    border: none;
+    background: none;
+    border-radius: 0;
+    padding-left: 6px;
+  }
+
+  #search {
+    font: inherit;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 7px 12px;
+    width: 260px;
+    margin-left: 18px;
+    outline: none;
+  }
+  #search:focus { border-color: var(--accent); }
+  #search::placeholder { color: var(--dim); }
+
+  select {
+    font: inherit;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 7px 10px;
+    cursor: pointer;
+    outline: none;
+  }
+  select:focus { border-color: var(--accent); }
+
+  .reclaim-label { color: var(--dim); font-weight: 400; font-size: 12px; }
+
+  .file-size {
+    color: var(--dim);
+    font-size: 11px;
+    font-family: ui-monospace, "JetBrains Mono", monospace;
+    margin-left: 8px;
+  }
+
+  mark {
+    background: rgba(123, 95, 245, 0.32);
+    color: var(--text);
+    border-radius: 3px;
+    padding: 0 1px;
+  }
+  /* The star field sits behind everything and never intercepts a click —
+     a producer aiming at a checkbox must never hit the background. */
+  #stars {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+  }
+  header, main, .bar { position: relative; z-index: 1; }
+
+  .brand-mark {
+    height: 44px;
+    vertical-align: -14px;
+    margin-right: 12px;
+  }
+
+  /* Icon-only, so Settings costs a square rather than a word in a header
+     that already carries four buttons. */
+  button.icon {
+    padding: 7px 11px;
+    font-size: 19px;
+    line-height: 1;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 20px;
+  }
+  .tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: var(--dim);
+    padding: 8px 12px;
+  }
+  .tab:hover:not(.active) { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }</style>
 </head>
 <body>
 
+<canvas id="stars"></canvas>
+
 <header>
-  <div class="brand">Uforiya <span>Sample Organizer</span></div>
+  <div class="brand" id="btn-home" style="cursor:pointer">
+    <img src="assets/ufologo.png" alt="" class="brand-mark">Uforiya <span>Sample Organizer</span>
+  </div>
+  <input id="search" type="search" placeholder="Search by sample name" autocomplete="off" spellcheck="false">
   <div class="spacer"></div>
+  <button id="btn-back" style="display:none">← Back</button>
   <button id="btn-quarantine-view">Quarantine</button>
   <button id="btn-rescan">Rescan</button>
   <button id="btn-add" class="primary">Add folder</button>
+  <button id="btn-settings" class="icon" title="Settings" aria-label="Settings">⚙</button>
 </header>
 
 <main id="main"></main>
@@ -254,15 +390,25 @@ let AUTH = null;
 const selected = new Set();   // file ids ticked for removal
 const openGroups = new Set(); // group ids expanded, so a redraw keeps them
 const groupFiles = new Map(); // group id -> files, cached after first open
-let groups = [];
+let groups = [];        // groups currently rendered — one page or many
 let totals = null;
 let view = 'library';
+let query = '';
+let sortBy = 'reclaimable';
+let searchTimer = null;
+let pagesLoaded = 0;    // how many pages of the current result set are on screen
+let totalGroups = 0;    // how many exist for the current search, per the worker
+
+const PAGE_SIZE = 200;
 
 // One sound at a time. A producer comparing two copies wants to hear one
 // then the other, not both at once.
 let audio = null;
 let playingId = null;
-
+// Incremented on every play or stop. A callback that comes back holding a
+// stale number belongs to a sound that has already been replaced, and must
+// not touch what is playing now.
+let playToken = 0;
 const el = (id) => document.getElementById(id);
 const main = el('main');
 
@@ -285,7 +431,19 @@ async function api(path, options = {}) {
 
 function bytes(n) {
   if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+  // Per-file sizes made KB worth having: a 200KB hat rendered as
+  // "0.2 MB" reads as a rounding error rather than a real size.
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
+}
+
+// Wraps whatever the producer searched for, so a group that came back on
+// one odd filename shows which one it was rather than looking arbitrary.
+function highlight(value) {
+  const safe = escapeHtml(value);
+  if (!query) return safe;
+  const pattern = escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return safe.replace(new RegExp(pattern, 'gi'), (hit) => `<mark>${hit}</mark>`);
 }
 
 const count = (n) => n.toLocaleString();
@@ -301,8 +459,10 @@ async function groupDetail(groupId) {
 // ── Playback ────────────────────────────────────────────────────────────────
 
 function stopAudio() {
+  playToken++;
   if (audio) {
     audio.pause();
+    audio.src = '';   // drops the pending request rather than leaving it in flight
     audio = null;
   }
   playingId = null;
@@ -319,19 +479,30 @@ function togglePlay(fileId, button) {
   }
   stopAudio();
 
+  const mine = ++playToken;
+
   // Token in the query string: an <audio> element cannot set request
   // headers, same constraint as EventSource.
-  audio = new Audio(`${API}/audio/${fileId}?token=${encodeURIComponent(TOKEN)}`);
+  const sound = new Audio(`${API}/audio/${fileId}?token=${encodeURIComponent(TOKEN)}`);
+  audio = sound;
   playingId = fileId;
   button.classList.add('playing');
   button.textContent = '■';
 
-  audio.onended = stopAudio;
-  audio.onerror = () => {
+  sound.onended = () => { if (mine === playToken) stopAudio(); };
+
+  sound.onerror = () => {
+    if (mine !== playToken) return;
     stopAudio();
     showError('That file could not be played.');
   };
-  audio.play().catch(() => {
+
+  // Clicking a second sample while the first is still starting makes the
+  // first play() reject with AbortError — that is this code doing its job,
+  // not a failure, and it must not stop the sample that replaced it or
+  // claim that one is broken.
+  sound.play().catch((err) => {
+    if (mine !== playToken || err.name === 'AbortError') return;
     stopAudio();
     showError('That file could not be played.');
   });
@@ -339,6 +510,14 @@ function togglePlay(fileId, button) {
 
 
 // ── Scanning ────────────────────────────────────────────────────────────────
+
+// Raw phase names come straight from the worker's internal job states —
+// "walking", "hashing" — which mean nothing to a producer. This is the only
+// place they get translated before hitting the screen.
+const PHASE_LABELS = {
+  walking: 'Scanning folders',
+  hashing: 'Checking for duplicates',
+};
 
 function watchJob(jobId) {
   el('bar').style.display = 'flex';
@@ -361,12 +540,11 @@ function watchJob(jobId) {
       return;
     }
 
-    el('phase').textContent = data.phase;
+    el('phase').textContent = PHASE_LABELS[data.phase] || data.phase;
     el('current-path').textContent = data.current_path || '';
     const pct = data.total ? (data.done / data.total) * 100 : 0;
     el('progress-fill').style.width = pct + '%';
   };
-
   stream.onerror = () => {
     stream.close();
     el('bar').style.display = 'none';
@@ -387,9 +565,32 @@ function showError(message) {
   setTimeout(() => div.remove(), 8000);
 }
 
+// Shown for work that takes long enough to look like a hang. Selecting
+// across 400 groups is 400 round trips, and moving 400 files is 400 file
+// operations — neither is instant, and silence during either is the
+// difference between "it's working" and "it's broken".
+function showWorking(label) {
+  const overlay = document.createElement('div');
+  overlay.className = 'working';
+  overlay.innerHTML = `
+    <div class="working-label">${escapeHtml(label)}</div>
+    <div class="working-track"><div></div></div>
+    <div class="working-detail"></div>`;
+  document.body.appendChild(overlay);
+
+  return {
+    update(done, total, detail) {
+      overlay.querySelector('.working-track div').style.width =
+        total ? (done / total) * 100 + '%' : '0';
+      overlay.querySelector('.working-detail').textContent = detail || '';
+    },
+    done() { overlay.remove(); },
+  };
+}
+
 async function loadLibrary() {
   view = 'library';
-  el('btn-quarantine-view').textContent = 'Quarantine';
+  updateChrome();
 
   const roots = await api('/library/roots');
 
@@ -405,8 +606,6 @@ async function loadLibrary() {
   }
 
   totals = await api('/duplicates/totals');
-  const page = await api('/duplicates?page_size=200');
-  groups = page.groups;
 
   if (totals.groups === 0) {
     main.innerHTML = `
@@ -417,6 +616,11 @@ async function loadLibrary() {
     el('action-bar').style.display = 'none';
     return;
   }
+
+  const page = await fetchGroupPage(1);
+  groups = page.groups;
+  totalGroups = page.total_groups;
+  pagesLoaded = 1;
 
   // Every figure is shown against the library's own total. A count with no
   // scale tells a producer nothing: 568 files means one thing in a library
@@ -438,17 +642,94 @@ async function loadLibrary() {
         <div class="stat-label">duplicate groups</div>
       </div>
     </div>
-      <div class="actions">
-      <button id="btn-keep-one" class="primary">Keep one of each</button>
-      <span class="hint">Selects every extra copy. One of each sample stays.</span>
+    <div class="actions">
+      <div>
+        <button id="btn-keep-one" class="primary">Keep one of each</button>
+        <div class="hint" style="margin-top:6px">Selects every extra copy. One of each sample stays.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="hint" id="list-note"></span>
+      <div class="sort">
+        <span class="sort-icon">⇅</span>
+        <select id="sort-by" aria-label="Sort duplicate groups">
+          <option value="reclaimable">Most space reclaimable</option>
+          <option value="copies">Most copies</option>
+          <option value="size">Largest samples</option>
+        </select>
+      </div>
     </div>
     <div id="group-list"></div>`;
 
   el('btn-keep-one').onclick = keepOneOfEach;
 
+  el('sort-by').value = sortBy;
+  el('sort-by').onchange = (event) => {
+    sortBy = event.target.value;
+    loadLibrary();
+  };
+
+  // Only shown while searching. The button's own explanation now sits
+  // under the button, where it cannot be mistaken for a description of
+  // whatever control happens to be next to it.
+  el('list-note').textContent = query
+    ? `${count(totalGroups)} group${totalGroups === 1 ? '' : 's'} matching "${query}"`
+    : '';
+
   const list = el('group-list');
+
+  if (groups.length === 0) {
+    list.innerHTML = `<p class="hint">No duplicate groups contain a sample named "${escapeHtml(query)}".</p>`;
+    updateActionBar();
+    return;
+  }
+
   groups.forEach((group) => list.appendChild(renderGroup(group)));
+  renderMoreButton();
   updateActionBar();
+}
+
+function fetchGroupPage(page) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(PAGE_SIZE),
+    sort: sortBy,
+  });
+  if (query) params.set('q', query);
+  return api('/duplicates?' + params.toString());
+}
+
+// Everything past the first page used to be unreachable — 208 of 408 groups
+// existed only in the worker, with nothing on screen admitting it.
+function renderMoreButton() {
+  const existing = el('btn-more');
+  if (existing) existing.remove();
+
+  if (groups.length >= totalGroups) return;
+
+  const remaining = totalGroups - groups.length;
+  const button = document.createElement('button');
+  button.id = 'btn-more';
+  button.textContent = `Show ${count(Math.min(remaining, PAGE_SIZE))} more of ${count(remaining)} remaining`;
+
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    try {
+      const page = await fetchGroupPage(pagesLoaded + 1);
+      pagesLoaded++;
+      groups = groups.concat(page.groups);
+      totalGroups = page.total_groups;
+
+      const list = el('group-list');
+      page.groups.forEach((group) => list.appendChild(renderGroup(group)));
+      renderMoreButton();
+    } catch (err) {
+      showError(err.message);
+      button.disabled = false;
+    }
+  };
+
+  el('group-list').after(button);
 }
 
 function renderGroup(group) {
@@ -457,7 +738,8 @@ function renderGroup(group) {
   node.innerHTML = `
     <div class="group-head">
       <span class="chevron">▶</span>
-      <span class="reclaim">${bytes(group.reclaimable_bytes)}</span>
+      <span class="reclaim">${bytes(group.reclaimable_bytes)}
+        <span class="reclaim-label">reclaimable</span></span>
       <span>${group.copies} copies</span>
       <span class="spacer"></span>
       <button class="small keep-one">Keep one</button>
@@ -524,7 +806,8 @@ function renderFile(file) {
   const body = document.createElement('div');
   body.className = 'file-main';
   body.innerHTML = `
-    <div class="file-name">${escapeHtml(file.filename)}
+    <div class="file-name">${highlight(file.filename)}
+      <span class="file-size">${bytes(file.size)}</span>
       ${file.suggested_keep ? '<span class="keep">KEEP</span>' : ''}</div>
     <div class="file-path">${escapeHtml(file.path)}</div>`;
 
@@ -539,9 +822,9 @@ function renderFile(file) {
 
 async function loadQuarantine() {
   view = 'quarantine';
-  el('btn-quarantine-view').textContent = 'Back to library';
   el('action-bar').style.display = 'none';
   stopAudio();
+  updateChrome();
 
   const data = await api('/quarantine');
   const live = data.batches.filter((b) => !b.purged_at && b.file_count > 0);
@@ -600,6 +883,167 @@ async function loadQuarantine() {
   });
 }
 
+// ── Settings view ────────────────────────────────────────────────────────────
+
+// Three panels behind one gear: the folders being scanned, whether a newer
+// build exists, and what this app is. None of them are things a producer
+// visits mid-task, which is why they are one icon rather than three words
+// in the header.
+const SETTINGS_TABS = [
+  ['folders', 'Folders'],
+  ['updates', 'Updates'],
+  ['about',   'About'],
+];
+
+async function loadSettings(tab = 'folders') {
+  view = 'settings';
+  el('action-bar').style.display = 'none';
+  stopAudio();
+  updateChrome();
+
+  main.innerHTML = `
+    <div style="max-width:640px">
+      <div class="tabs">
+        ${SETTINGS_TABS.map(([id, label]) =>
+          `<button class="tab ${id === tab ? 'active' : ''}" data-tab="${id}">${label}</button>`
+        ).join('')}
+      </div>
+      <div id="settings-panel"></div>
+    </div>`;
+
+  main.querySelectorAll('.tab').forEach((button) => {
+    button.onclick = () => loadSettings(button.dataset.tab);
+  });
+
+  const panel = el('settings-panel');
+  if (tab === 'folders') await renderFoldersTab(panel);
+  else if (tab === 'updates') await renderUpdatesTab(panel);
+  else await renderAboutTab(panel);
+}
+
+async function renderFoldersTab(panel) {
+  const roots = await api('/library/roots');
+
+  panel.innerHTML = `
+    <p class="hint" style="margin:0 0 16px">
+      Uforiya scans these folders for duplicate samples. Removing a folder
+      here does not touch anything on your disk.
+    </p>
+    <div id="root-list"></div>
+    <button id="btn-settings-add" class="primary" style="margin-top:14px">
+      Add another folder
+    </button>`;
+
+  const list = el('root-list');
+  roots.roots.forEach((root) => list.appendChild(renderRoot(root)));
+
+  el('btn-settings-add').onclick = async () => {
+    const folder = await window.uforiya.pickFolder();
+    if (!folder) return;
+    try {
+      const result = await api('/library/roots', {
+        method: 'POST',
+        body: JSON.stringify({ path: folder }),
+      });
+      watchJob(result.job_id);
+    } catch (err) { showError(err.message); }
+  };
+}
+
+async function renderUpdatesTab(panel) {
+  panel.innerHTML = '<p class="hint" style="margin:0">Checking…</p>';
+
+  const info = await window.uforiya.checkForUpdate();
+
+  // Unreachable is not an error. The app works offline by design, and a
+  // producer who cannot reach the site does not need to be told something
+  // went wrong.
+  if (!info.reachable) {
+    panel.innerHTML = `
+      <div class="batch">
+        <div style="flex:1">
+          <div>You're on version ${escapeHtml(info.current)}</div>
+          <div class="stat-label">Couldn't check for updates right now.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  if (!info.newer) {
+    panel.innerHTML = `
+      <div class="batch">
+        <div style="flex:1">
+          <div>You're up to date</div>
+          <div class="stat-label">Version ${escapeHtml(info.current)}</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  panel.innerHTML = `
+    <div class="batch">
+      <div style="flex:1">
+        <div>Version ${escapeHtml(info.latest)} is available</div>
+        <div class="stat-label">You're on ${escapeHtml(info.current)}</div>
+      </div>
+      <button id="btn-get-update" class="primary">Get it</button>
+    </div>
+    ${info.notes ? `<p class="hint" style="margin:0">${escapeHtml(info.notes)}</p>` : ''}
+    <p class="hint" style="margin:16px 0 0">
+      Updating means downloading and running the installer again. Your
+      library and anything in quarantine stay exactly as they are.
+    </p>`;
+
+  el('btn-get-update').onclick = () => window.open(info.url, '_blank');
+}
+
+async function renderAboutTab(panel) {
+  const version = await window.uforiya.getAppVersion();
+
+  panel.innerHTML = `
+    <p class="hint" style="margin:0 0 16px">
+      This is a small standalone tool from Uforiya, a collaboration
+      platform for unreleased music. It has no account and no connection to
+      that platform — nothing about your library ever leaves this machine.
+    </p>
+    <div class="batch">
+      <div style="flex:1">Uforiya, the platform</div>
+      <button id="btn-open-web">uforiya.com</button>
+    </div>
+    <div class="batch">
+      <div style="flex:1">Sample Organizer version</div>
+      <span class="hint">${escapeHtml(version)}</span>
+    </div>`;
+
+  el('btn-open-web').onclick = () => window.open('https://uforiya.com', '_blank');
+}
+
+
+function renderRoot(root) {
+  const row = document.createElement('div');
+  row.className = 'batch'; // reuse the quarantine-batch row styling
+  row.innerHTML = `<div style="flex:1" class="file-path">${escapeHtml(root.path)}</div>`;
+
+  const remove = document.createElement('button');
+  remove.className = 'danger';
+  remove.textContent = 'Remove';
+  remove.onclick = async () => {
+    if (!confirm(
+      `Stop scanning "${root.path}"?\n\n` +
+      `Nothing on disk is touched. Uforiya forgets everything it found ` +
+      `here — your duplicate list updates right away.`
+    )) return;
+    try {
+      await api(`/library/roots/${encodeURIComponent(root.id)}`, { method: 'DELETE' });
+      groupFiles.clear();
+      loadSettings();
+    } catch (err) { showError(err.message); }
+  };
+
+  row.appendChild(remove);
+  return row;
+}
+
 
 // ── Selection ───────────────────────────────────────────────────────────────
 
@@ -619,6 +1063,96 @@ function escapeHtml(value) {
   div.textContent = value;
   return div.innerHTML;
 }
+
+// Back appears wherever the library isn't. One control rather than each
+// view remembering to offer its own way out.
+function updateChrome() {
+  el('btn-back').style.display = view === 'library' ? 'none' : 'inline-block';
+  // Search only means anything against the duplicate list.
+  el('search').style.display = view === 'library' ? 'inline-block' : 'none';
+}
+
+
+// ── Star field ──────────────────────────────────────────────────────────────
+
+// The house background, shared with every other Uforiya app. It renders
+// behind the content and takes no clicks, so it cannot come between a
+// producer and a decision about their files.
+(function starfield() {
+  const canvas = el('stars');
+  const ctx = canvas.getContext('2d');
+  const pointer = { x: -9999, y: -9999 };
+  let w = 0, h = 0, points = [];
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    w = window.innerWidth;
+    h = window.innerHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Density scales with area, so a maximised window isn't sparse and a
+    // small one isn't cluttered.
+    const n = Math.round((w * h) / 3500);
+    points = Array.from({ length: n }, () => ({
+      x: Math.random() * w,
+      y: Math.random() * h,
+      r: Math.random() * 1.1 + 0.3,
+      base: Math.random() * 0.35 + 0.12,
+      speed: Math.random() * 0.0012 + 0.0004,
+      phase: Math.random() * Math.PI * 2,
+      color: Math.random() < 0.25 ? '#9b7ff7' : '#e8e8f0',
+    }));
+  }
+
+  function frame(t) {
+    ctx.clearRect(0, 0, w, h);
+
+    for (const p of points) {
+      // Each star twinkles on its own phase, so the field never pulses
+      // in unison — that reads as a broken screen rather than a sky.
+      let alpha = p.base + Math.sin(p.phase + t * p.speed) * 0.14;
+      let ox = 0, oy = 0;
+
+      const dx = p.x - pointer.x;
+      const dy = p.y - pointer.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Stars near the cursor brighten and drift slightly. Enough to feel
+      // alive; not enough to pull the eye off a list of filenames.
+      if (dist < 130) {
+        const force = 1 - dist / 130;
+        alpha += force * 0.45;
+        ox = dx * force * 0.07;
+        oy = dy * force * 0.07;
+      }
+
+      ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x + ox, p.y + oy, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('mousemove', (e) => {
+    pointer.x = e.clientX;
+    pointer.y = e.clientY;
+  });
+  document.addEventListener('mouseleave', () => {
+    pointer.x = pointer.y = -9999;
+  });
+
+  resize();
+  requestAnimationFrame(frame);
+})();
 
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
@@ -645,26 +1179,70 @@ el('btn-quarantine-view').onclick = () => {
   view === 'quarantine' ? loadLibrary() : loadQuarantine();
 };
 
+el('btn-settings').onclick = () => loadSettings();
+el('btn-home').onclick = () => { if (view !== 'library') loadLibrary(); };
+el('btn-back').onclick = () => loadLibrary();
+
+// Debounced: each keystroke is a round trip to the worker and a redraw of
+// the list, and a producer typing "808" should cost one of those, not three.
+el('search').oninput = (event) => {
+  query = event.target.value.trim();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    // Open groups and cached members belong to the previous result set.
+    openGroups.clear();
+    loadLibrary();
+  }, 220);
+};
 el('btn-clear').onclick = async () => {
   selected.clear();
   await loadLibrary();
 };
 
-// Ticks every copy except the one the worker suggests keeping, across the
-// whole library. The wording says what happens to the samples rather than
-// what happens to the checkboxes — a producer cares that one of each
-// survives, not that 568 rows got selected.
+// Ticks every copy except the one the worker suggests keeping, across every
+// group the current view covers — not just the page that happens to be
+// rendered.
+//
+// This used to promise the library-wide figure and then quietly act on the
+// first 200 groups, which meant two rounds of clicking to finish one job.
+// It now walks every page itself, and the number in the confirm is the
+// number it will actually select.
 async function keepOneOfEach() {
   if (!totals) return;
+
   if (!confirm(
-    `Select ${count(totals.removable_files)} extra copies for removal?\n\n` +
+    `Select every extra copy across ${count(totalGroups)} duplicate group${totalGroups === 1 ? '' : 's'}?\n\n` +
+    (query ? `Only groups matching "${query}" are affected. ` : '') +
     `One copy of every sample stays where it is. ` +
     `Nothing moves until you choose to move it.`
   )) return;
 
-  for (const group of groups) {
-    const files = await groupDetail(group.group_id);
-    files.forEach((f) => { if (!f.suggested_keep) selected.add(f.file_id); });
+  const working = showWorking('Selecting extra copies');
+
+  try {
+    // Pages the worker rather than trusting what is on screen. Pages
+    // already fetched are reused; the rest are pulled as needed.
+    const all = groups.slice();
+    let page = pagesLoaded;
+
+    while (all.length < totalGroups) {
+      working.update(all.length, totalGroups, `Reading group list…`);
+      const next = await fetchGroupPage(++page);
+      if (!next.groups.length) break;   // worker disagrees about the total; stop rather than loop
+      all.push(...next.groups);
+    }
+
+    let index = 0;
+    for (const group of all) {
+      const files = await groupDetail(group.group_id);
+      files.forEach((f) => { if (!f.suggested_keep) selected.add(f.file_id); });
+      index++;
+      working.update(index, all.length, `${count(index)} of ${count(all.length)} groups`);
+    }
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    working.done();
   }
 
   // Redraw so already-open groups show their new ticks.
@@ -679,6 +1257,13 @@ el('btn-remove').onclick = async () => {
   )) return;
 
   stopAudio();
+
+  // The worker moves every file in one request and answers when it is
+  // finished, so there is no progress to report — but several hundred file
+  // operations take long enough that silence reads as a hang.
+  const working = showWorking('Moving files to quarantine');
+  working.update(1, 1, `${count(ids.length)} file${ids.length === 1 ? '' : 's'}`);
+
   try {
     const result = await api('/quarantine', {
       method: 'POST',
@@ -692,7 +1277,11 @@ el('btn-remove').onclick = async () => {
     // A scan reconciles the index with what is now on disk.
     const scan = await api('/scan', { method: 'POST' });
     watchJob(scan.job_id);
-  } catch (err) { showError(err.message); }
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    working.done();
+  }
 };
 
 

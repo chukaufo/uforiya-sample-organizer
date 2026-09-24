@@ -40,13 +40,38 @@ def _kit_name(rel_path: str) -> str:
     return parts[-2]
 
 
+# Whitelisted sort expressions. The key comes off a query string, so it
+# is looked up here and never interpolated — an unknown key falls back to
+# the default rather than reaching SQLite.
+#
+# "Largest files" and "most space wasted" are genuinely different
+# questions: one 40MB loop copied once beats a 2MB hat copied six times
+# on the first, and loses on the second.
+SORTS = {
+    "reclaimable": "size * (copies - 1) DESC, copies DESC",
+    "copies":      "copies DESC, size * (copies - 1) DESC",
+    "size":        "size DESC, copies DESC",
+}
+DEFAULT_SORT = "reclaimable"
+
+
+def _like_pattern(q: str) -> str:
+    """Wildcards the query for a contains-match, escaping the characters
+    LIKE treats as wildcards so a literal % or _ in a filename searches
+    as itself."""
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def list_groups(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     match_type: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
 ) -> dict:
     """
-    Duplicate groups, ordered by reclaimable bytes descending.
+    Duplicate groups, ordered by reclaimable bytes descending by default.
 
     Biggest wins first is the right default: a producer clearing space
     wants the 40MB loop duplicated six times before the 200KB hat
@@ -57,23 +82,44 @@ def list_groups(
     another — which is correct rather than a bug, but the UI must
     treat the two groups as separate decisions.
 
+    A search matches on filename and selects whole groups: if any copy
+    matches, every copy comes back. Returning only the matching members
+    would be actively dangerous — the last-copy guard counts what is in
+    the group, not what is on screen, so a producer ticking every
+    visible row would have the whole batch refused with a 400 and no
+    explanation they could act on.
+
     Paged. Never return 410 groups at once, let alone the thousands a
     large library produces.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
     offset = (page - 1) * page_size
+    order = SORTS.get(sort or DEFAULT_SORT, SORTS[DEFAULT_SORT])
+
+    # The search lands in HAVING rather than WHERE on purpose. In WHERE it
+    # would filter rows before COUNT(*) ran, so a group of four copies
+    # where two match would report two copies — and the reclaimable figure
+    # and the last-copy guard would both be computed against a number that
+    # is not what is on disk.
+    q = (q or "").strip()
+    having = ""
+    base_params: list = []
+    if q:
+        having = " AND SUM(CASE WHEN filename LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END) > 0"
+        pattern = _like_pattern(q)
+        base_params = [pattern, pattern]
 
     # A single UNION ALL over the two hash columns, so paging and
     # ordering apply across both rather than per-type. The literal
     # match_type rides along so the caller knows which column produced
     # each group without a second query.
-    base = """
+    base = f"""
         SELECT 'exact'      AS match_type, sha256   AS hash_value,
                COUNT(*)     AS copies,     MIN(size) AS size
         FROM files
         WHERE state = 'present' AND sha256 IS NOT NULL
-        GROUP BY sha256 HAVING COUNT(*) > 1
+        GROUP BY sha256 HAVING COUNT(*) > 1{having}
 
         UNION ALL
 
@@ -81,35 +127,24 @@ def list_groups(
                COUNT(*)     AS copies,     MIN(size) AS size
         FROM files
         WHERE state = 'present' AND pcm_hash IS NOT NULL
-        GROUP BY pcm_hash HAVING COUNT(*) > 1
+        GROUP BY pcm_hash HAVING COUNT(*) > 1{having}
     """
 
+    where = ""
+    filter_params: list = []
     if match_type in ("exact", "re-encoded"):
-        rows = db.get_conn().execute(
-            f"""
-            SELECT * FROM ({base})
-            WHERE match_type = ?
-            ORDER BY size * (copies - 1) DESC, copies DESC
-            LIMIT ? OFFSET ?
-            """,
-            (match_type, page_size, offset),
-        ).fetchall()
-        total = db.get_conn().execute(
-            f"SELECT COUNT(*) AS n FROM ({base}) WHERE match_type = ?",
-            (match_type,),
-        ).fetchone()["n"]
-    else:
-        rows = db.get_conn().execute(
-            f"""
-            SELECT * FROM ({base})
-            ORDER BY size * (copies - 1) DESC, copies DESC
-            LIMIT ? OFFSET ?
-            """,
-            (page_size, offset),
-        ).fetchall()
-        total = db.get_conn().execute(
-            f"SELECT COUNT(*) AS n FROM ({base})"
-        ).fetchone()["n"]
+        where = " WHERE match_type = ?"
+        filter_params = [match_type]
+
+    rows = db.get_conn().execute(
+        f"SELECT * FROM ({base}){where} ORDER BY {order} LIMIT ? OFFSET ?",
+        (*base_params, *filter_params, page_size, offset),
+    ).fetchall()
+
+    total = db.get_conn().execute(
+        f"SELECT COUNT(*) AS n FROM ({base}){where}",
+        (*base_params, *filter_params),
+    ).fetchone()["n"]
 
     groups = []
     for row in rows:

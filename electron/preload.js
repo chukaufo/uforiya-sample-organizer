@@ -22,4 +22,12 @@ contextBridge.exposeInMainWorld('uforiya', {
   //
   // Returns the chosen path with forward slashes, or null if cancelled.
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
+
+  // The renderer has no Node access, so it can't read package.json itself.
+  // Used by the info tab to show a version a bug report can be tied to.
+  getAppVersion: () => ipcRenderer.invoke('app:version'),
+
+  // The page's CSP permits loopback only, so the one outbound request the
+  // app makes is done on the privileged side and handed back as data.
+  checkForUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
 });

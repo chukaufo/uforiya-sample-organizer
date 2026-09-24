@@ -256,9 +256,16 @@ def get_duplicates(
     page: int = 1,
     page_size: int = duplicates.DEFAULT_PAGE_SIZE,
     match_type: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
 ):
-    """Duplicate groups, biggest reclaimable first, paged."""
-    return duplicates.list_groups(page=page, page_size=page_size, match_type=match_type)
+    """Duplicate groups, biggest reclaimable first, paged.
+
+    `q` matches filenames and returns whole groups. `sort` is one of
+    reclaimable, copies, size — anything else falls back to the default."""
+    return duplicates.list_groups(
+        page=page, page_size=page_size, match_type=match_type, q=q, sort=sort
+    )
 
 
 @app.get("/duplicates/totals", dependencies=[Depends(require_token)])

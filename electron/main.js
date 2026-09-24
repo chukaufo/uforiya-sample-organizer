@@ -3,7 +3,7 @@
 // This file holds no business logic. It starts a Python process, waits for it
 // to announce its port, opens a window, and hands over. Every decision about
 // files is made by the worker.
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
@@ -219,6 +219,45 @@ ipcMain.handle('worker:info', () => ({
   token: workerToken,
 }));
 
+ipcMain.handle('app:version', () => app.getVersion());
+
+// Update check lives here, not in the renderer, because the page's CSP
+// only permits loopback — and should stay that way. This is the single
+// outbound request the app ever makes, it is triggered by the producer
+// opening a tab, and it sends nothing but a plain GET.
+const UPDATE_MANIFEST_URL = 'https://uforiya.com/sample-organizer/latest.json';
+
+function isNewer(candidate, current) {
+  const a = String(candidate).split('.').map(Number);
+  const b = String(current).split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+ipcMain.handle('app:checkUpdate', async () => {
+  const current = app.getVersion();
+  try {
+    const res = await fetch(UPDATE_MANIFEST_URL, { cache: 'no-store' });
+    if (!res.ok) return { reachable: false, current };
+    const latest = await res.json();
+    return {
+      reachable: true,
+      current,
+      latest: latest.version,
+      notes: latest.notes || '',
+      url: latest.url || 'https://uforiya.com/sample-organizer',
+      newer: isNewer(latest.version, current),
+    };
+  } catch (err) {
+    // Offline, DNS down, site moved — all the same to the producer, and
+    // none of them are worth an error dialog on a tool that works fine
+    // without ever phoning home.
+    return { reachable: false, current };
+  }
+});
 // The one thing the worker cannot do itself: a native folder picker needs a
 // window handle to parent the dialog to, and the worker has no window.
 ipcMain.handle('dialog:pickFolder', async () => {
@@ -235,9 +274,19 @@ ipcMain.handle('dialog:pickFolder', async () => {
 // ── App lifecycle ───────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  // macOS ignores BrowserWindow's icon option and takes the dock icon from
+  // the app bundle, which in development is Electron's own. This is the only
+  // way to see the real icon before packaging; packaged builds get theirs
+  // from electron-builder instead.
+  if (IS_DEV && process.platform === 'darwin') {
+    const icon = nativeImage.createFromPath(
+      path.join(__dirname, '..', 'build', 'uforiya-sample-icon.png')
+    );
+    if (!icon.isEmpty()) app.dock.setIcon(icon);
+  }
+
   try {
-    await startWorker();
-  } catch (err) {
+    await startWorker();  } catch (err) {
     dialog.showErrorBox(
       'Uforiya Sample Organizer',
       `Could not start the background worker.\n\n${err.message}`
