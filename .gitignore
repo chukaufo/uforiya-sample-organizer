@@ -7,3 +7,4 @@ duplicates.html
 .venv/
 node_modules/
 dist/
+build/worker/
