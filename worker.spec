@@ -6,11 +6,35 @@
 #
 # Must be built on the target OS — PyInstaller cannot cross-compile, so the
 # Windows binary comes from the Windows machine.
+import os
+import shutil
+import sys
+
+# FFmpeg ships beside the worker so preview playback works for formats
+# Chromium cannot decode — AIFF above all, which is native on Mac and
+# which no browser has ever supported.
+#
+# Found on the build machine's PATH rather than committed to the repo: it
+# is ~80MB, it is platform-specific, and a binary in git is a binary
+# nobody updates. The build fails loudly if it is missing, because the
+# alternative is shipping an app whose preview button silently fails on
+# half a producer's library.
+_FFMPEG_NAME = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+_ffmpeg = shutil.which(_FFMPEG_NAME) or shutil.which('ffmpeg')
+
+if not _ffmpeg:
+    raise SystemExit(
+        f'FFmpeg not found on PATH. Install it and rebuild:\n'
+        f'  macOS:   brew install ffmpeg\n'
+        f'  Windows: winget install Gyan.FFmpeg  (then reopen the terminal)'
+    )
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    # ('.',) puts it next to worker.exe, which is exactly where
+    # platform_paths.bundled_binary looks when frozen.
+    binaries=[(_ffmpeg, '.')],
     datas=[('category_keywords.json', '.')],
     # uvicorn loads its protocol and lifespan implementations by string name
     # at runtime, so static analysis never sees them and they are missing

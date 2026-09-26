@@ -2,8 +2,9 @@
 #
 # Nothing is ever deleted here. Approved files are moved to a staging
 # folder in app-data, the index records where each came from, and a
-# JSON manifest is written beside them. Permanent deletion is a
-# separate, later action the user takes deliberately.
+# journal line is written beside them before each move — so files moved
+# before a crash are recoverable on the next launch. Permanent deletion
+# is a separate, later action the user takes deliberately.
 #
 # Three reasons this is the right model rather than a recycle-bin send
 # or a straight unlink. A false positive costs a sample that cannot be
@@ -23,9 +24,17 @@ from typing import Optional
 
 import db
 import hashing
-from platform_paths import quarantine_dir
+from platform_paths import normalize_path, quarantine_dir, restored_dir
 
+# Whole-file manifest written by builds up to 0.1.0. Still read during
+# recovery so a batch made by an older build is not stranded.
 MANIFEST_NAME = "manifest.json"
+
+# Append-only journal, one JSON object per line. Written a line at a
+# time rather than rewritten whole, so the cost per file is a short
+# append instead of re-serialising the entire batch, and a crash
+# mid-append costs one unparseable line rather than the whole file.
+JOURNAL_NAME = "manifest.jsonl"
 
 
 class QuarantineError(Exception):
@@ -134,33 +143,259 @@ def _move_file(source: str, destination: str) -> None:
     os.remove(source)
 
 
-def _write_manifest(batch_dir: str, batch_id: int, items: list) -> None:
-    """
-    Writes the batch's contents as JSON inside the quarantine folder
-    itself, as well as to SQLite.
+def _journal_path(batch_dir: str) -> str:
+    return os.path.join(batch_dir, JOURNAL_NAME)
 
-    If the index is ever lost or corrupted, the files are still
-    restorable by hand from this file. Redundancy is cheap here and the
-    failure it covers is unrecoverable otherwise.
-    """
-    manifest = {
+
+def _journal_batch(batch_dir: str, batch_id: int, created_at: int) -> None:
+    """Opening line of a batch's journal: what it is and when it started."""
+    _journal_write(batch_dir, {
+        "type": "batch",
         "batch_id": batch_id,
-        "created_at": int(time.time()),
-        "items": [
-            {
-                "original_path": item["original_path"],
-                "quarantine_path": item["quarantine_path"],
-                "sha256": item["sha256"],
-                "size": item["size"],
+        "created_at": created_at,
+    })
+
+
+def _journal_item(batch_dir: str, item: dict) -> None:
+    """One file's line. Everything a restore needs, and nothing else."""
+    _journal_write(batch_dir, {
+        "type": "item",
+        "original_path": item["original_path"],
+        "quarantine_path": item["quarantine_path"],
+        "sha256": item["sha256"],
+        "size": item["size"],
+    })
+
+
+def _journal_write(batch_dir: str, entry: dict) -> None:
+    """
+    Appends one line and flushes it to the OS.
+
+    flush without fsync on purpose. Flushing puts the line beyond this
+    process, which is what a crash or a force-quit costs; fsync would
+    additionally survive the machine losing power, at the price of a
+    disk sync per file. The index makes the same trade
+    (synchronous=NORMAL in db.py), and matching it keeps the two
+    records equally durable rather than one waiting on the other.
+    """
+    with open(_journal_path(batch_dir), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+        f.flush()
+
+
+def read_journal(batch_dir: str) -> dict:
+    """
+    Everything a batch's journal claims, as {created_at, items}.
+
+    Lines that do not parse are skipped rather than fatal — a crash
+    during an append leaves a truncated final line, and one lost line
+    must not cost the other five hundred. Falls back to the old
+    whole-file manifest for batches written by earlier builds.
+    """
+    created_at = None
+    items = []
+    path = _journal_path(batch_dir)
+
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") == "batch":
+                    created_at = entry.get("created_at")
+                elif entry.get("quarantine_path"):
+                    items.append(entry)
+        return {"created_at": created_at, "items": items}
+
+    legacy = os.path.join(batch_dir, MANIFEST_NAME)
+    if os.path.isfile(legacy):
+        try:
+            with open(legacy, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "created_at": data.get("created_at"),
+                "items": data.get("items", []),
             }
-            for item in items
-        ],
-    }
-    with open(os.path.join(batch_dir, MANIFEST_NAME), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+        except (ValueError, OSError):
+            pass
+
+    return {"created_at": None, "items": []}
+
+
+# ── Restore destinations ─────────────────────────────────────────────────────
+
+def _matching_root(original_path: str, roots: list) -> Optional[dict]:
+    """
+    The registered root a quarantined file came from, longest match first.
+
+    Longest wins because roots can nest — a producer may have added both
+    their samples folder and one kit inside it, and the kit is the more
+    specific answer.
+    """
+    best = None
+    for root in roots:
+        prefix = root["path"].rstrip("/") + "/"
+        if original_path.startswith(prefix):
+            if best is None or len(root["path"]) > len(best["path"]):
+                best = root
+    return best
+
+
+def _restore_destination(original_path: str, roots: list) -> tuple:
+    """
+    Where a file should go, and whether that is its original home.
+
+    Returns (destination, relocated). Relocated means the original
+    folder no longer exists and the file is going somewhere else — which
+    the caller must report, and must not record as a restore to the
+    index.
+    """
+    if os.path.isdir(os.path.dirname(original_path)):
+        return original_path, False
+
+    root = _matching_root(original_path, roots)
+
+    if root:
+        base = restored_dir(near=root["path"])
+        # Path relative to the root is kept, so a restored file still
+        # says which kit it belonged to.
+        relative = original_path[len(root["path"].rstrip("/")) + 1:]
+    else:
+        base = restored_dir()
+        relative = os.path.basename(original_path)
+
+    return normalize_path(os.path.join(str(base), relative)), True
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+# What the last recovery pass adopted, for the UI to report once. Reset
+# on every launch, since it describes this launch.
+LAST_RECOVERY = {"batches": 0, "files": 0}
+
+
+def _index_file_id(original_path: str, roots: list) -> int:
+    """
+    The index row a quarantined file belongs to, or 0 if there isn't one.
+
+    Journals store paths, not row ids, because a rebuilt index has
+    different ids and adopting a stale one would flip the state of an
+    unrelated file. 0 means 'no row' — the file is still restorable to
+    its original path, the index simply has nothing to update.
+    """
+    root = _matching_root(original_path, roots)
+    if root is None:
+        return 0
+
+    relative = original_path[len(root["path"].rstrip("/")) + 1:]
+    row = db.get_conn().execute(
+        "SELECT id FROM files WHERE root_id = ? AND rel_path = ?",
+        (root["id"], relative),
+    ).fetchone()
+    return row["id"] if row else 0
+
+
+def recover_orphan_batches() -> dict:
+    """
+    Adopts quarantined files the index does not know about.
+
+    The case this exists for: the app was killed partway through a
+    move, or library.db was lost, and there are real files sitting in a
+    batch folder that nothing in the app can see. Before this ran, they
+    were invisible — a producer would open Quarantine, find it empty,
+    and conclude their samples were gone.
+
+    Nothing here moves or deletes a file. It reads each batch's
+    journal, confirms the file is actually where the journal says, and
+    writes the missing index rows so Put back works normally.
+
+    Purged batches are skipped: their rows say deliberately deleted,
+    and re-adopting leftovers would undo a decision the producer made.
+    """
+    base = str(quarantine_dir())
+    roots = db.list_roots()
+    batches = 0
+    files = 0
+
+    for name in sorted(os.listdir(base)):
+        batch_dir = os.path.join(base, name)
+        if not name.isdigit() or not os.path.isdir(batch_dir):
+            continue
+
+        batch_id = int(name)
+        batch = db.get_conn().execute(
+            "SELECT id, purged_at FROM quarantine_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch and batch["purged_at"]:
+            continue
+
+        journal = read_journal(batch_dir)
+        if not journal["items"]:
+            continue
+
+        known = {
+            row["quarantine_path"]
+            for row in db.get_conn().execute(
+                "SELECT quarantine_path FROM quarantine_items WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchall()
+        }
+
+        # Only entries whose file is genuinely there. A journal line is
+        # a claim, not proof — the move it describes may never have
+        # happened, or the file may have been restored since.
+        adopt = [
+            entry for entry in journal["items"]
+            if entry["quarantine_path"] not in known
+            and os.path.isfile(entry["quarantine_path"])
+        ]
+        if not adopt:
+            continue
+
+        with db._write_lock:
+            conn = db.get_conn()
+
+            if batch is None:
+                conn.execute(
+                    "INSERT INTO quarantine_batches (id, created_at, file_count, bytes) "
+                    "VALUES (?, ?, 0, 0)",
+                    (batch_id,
+                     journal["created_at"] or int(os.path.getmtime(batch_dir))),
+                )
+
+            for entry in adopt:
+                file_id = _index_file_id(entry["original_path"], roots)
+                conn.execute(
+                    "INSERT INTO quarantine_items "
+                    "(batch_id, file_id, original_path, quarantine_path, sha256, size) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (batch_id, file_id, entry["original_path"],
+                     entry["quarantine_path"], entry.get("sha256"), entry["size"]),
+                )
+                if file_id:
+                    conn.execute(
+                        "UPDATE files SET state = 'quarantined' WHERE id = ?",
+                        (file_id,),
+                    )
+
+            conn.execute(
+                "UPDATE quarantine_batches SET file_count = file_count + ?, "
+                "bytes = bytes + ? WHERE id = ?",
+                (len(adopt), sum(e["size"] for e in adopt), batch_id),
+            )
+            conn.commit()
+
+        batches += 1
+        files += len(adopt)
+
+    LAST_RECOVERY["batches"] = batches
+    LAST_RECOVERY["files"] = files
+    return dict(LAST_RECOVERY)
 
 def quarantine_files(file_ids: list) -> dict:
     """
@@ -201,7 +436,11 @@ def quarantine_files(file_ids: list) -> dict:
 
     prepared = []
     for row in rows:
-        abs_path = os.path.join(row["root_path"], row["rel_path"])
+        # Normalised, because everything downstream — the root match on
+        # restore, the recovery pass — compares these against roots
+        # stored with forward slashes. os.path.join on Windows would
+        # hand back a mixed-separator path that matches nothing.
+        abs_path = normalize_path(os.path.join(row["root_path"], row["rel_path"]))
         _verify_unchanged(row, abs_path)
         prepared.append((row, abs_path))
 
@@ -219,6 +458,7 @@ def quarantine_files(file_ids: list) -> dict:
 
     batch_dir = os.path.join(str(quarantine_dir()), str(batch_id))
     os.makedirs(batch_dir, exist_ok=True)
+    _journal_batch(batch_dir, batch_id, now)
 
     moved = []
     failures = []
@@ -228,46 +468,60 @@ def quarantine_files(file_ids: list) -> dict:
         # Clap.wav from different kits cannot collide, and a restore by
         # hand is legible.
         destination = os.path.join(batch_dir, row["rel_path"])
+
+        item = {
+            "file_id": row["id"],
+            "original_path": abs_path,
+            "quarantine_path": destination,
+            "sha256": row["sha256"],
+            "size": row["size"],
+        }
+
+        # Written before the move rather than after. If the app dies
+        # between the move landing and the database row being written,
+        # this line is the only thing that knows the file left its
+        # folder — and recovery on the next launch reads it, confirms
+        # the file really is in the batch directory, and puts it back
+        # into quarantine properly.
+        #
+        # A line whose move never happened costs nothing: recovery finds
+        # no file at quarantine_path and ignores it.
+        _journal_item(batch_dir, item)
+
         try:
             _move_file(abs_path, destination)
         except (QuarantineError, OSError) as exc:
             failures.append({"path": row["rel_path"], "error": str(exc)})
             continue
 
-        moved.append({
-            "file_id": row["id"],
-            "original_path": abs_path,
-            "quarantine_path": destination,
-            "sha256": row["sha256"],
-            "size": row["size"],
-        })
+        moved.append(item)
 
-    if moved:
-        _write_manifest(batch_dir, batch_id, moved)
+        # Recorded the instant this one file's move succeeds — not
+        # batched until the whole loop finishes. A kill between any two
+        # files must never leave a moved file untracked: on disk in
+        # quarantine, but with no DB row and no manifest entry pointing
+        # at it.
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute(
+                "INSERT INTO quarantine_items "
+                "(batch_id, file_id, original_path, quarantine_path, sha256, size) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (batch_id, item["file_id"], item["original_path"],
+                 item["quarantine_path"], item["sha256"], item["size"]),
+            )
+            conn.execute(
+                "UPDATE files SET state = 'quarantined' WHERE id = ?",
+                (item["file_id"],),
+            )
+            conn.execute(
+                "UPDATE quarantine_batches SET file_count = file_count + 1, "
+                "bytes = bytes + ? WHERE id = ?",
+                (item["size"], batch_id),
+            )
+            conn.commit()
 
     total_bytes = sum(item["size"] for item in moved)
-
-    with db._write_lock:
-        conn = db.get_conn()
-        conn.executemany(
-            "INSERT INTO quarantine_items "
-            "(batch_id, file_id, original_path, quarantine_path, sha256, size) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (batch_id, m["file_id"], m["original_path"],
-                 m["quarantine_path"], m["sha256"], m["size"])
-                for m in moved
-            ],
-        )
-        conn.executemany(
-            "UPDATE files SET state = 'quarantined' WHERE id = ?",
-            [(m["file_id"],) for m in moved],
-        )
-        conn.execute(
-            "UPDATE quarantine_batches SET file_count = ?, bytes = ? WHERE id = ?",
-            (len(moved), total_bytes, batch_id),
-        )
-        conn.commit()
 
     return {
         "batch_id": batch_id,
@@ -309,6 +563,130 @@ def get_batch(batch_id: int) -> Optional[dict]:
     result["items"] = [dict(row) for row in items]
     return result
 
+def _restore_rows(batch_id: int, items: list, roots: list) -> dict:
+    """
+    Puts a set of quarantine rows back, and clears them from the index.
+
+    Shared by whole-batch restore and single-file restore, because the two
+    differ only in which rows they hand over. Every guard — the
+    already-exists check, the relocation fallback, the collision suffix —
+    must behave identically whether a producer restores one sample or five
+    hundred.
+    """
+    restored = []     # back at their original paths
+    relocated = []    # out of quarantine, but somewhere else
+    failures = []
+
+    for item in items:
+        if os.path.exists(item["original_path"]):
+            failures.append({
+                "path": item["original_path"],
+                "error": "A file already exists at this path; left untouched.",
+            })
+            continue
+
+        try:
+            destination, moved_elsewhere = _restore_destination(
+                item["original_path"], roots
+            )
+        except OSError as exc:
+            failures.append({"path": item["original_path"], "error": str(exc)})
+            continue
+
+        # A name collision in the restore folder is possible — two kits
+        # can hold the same relative path. Suffix rather than overwrite.
+        if moved_elsewhere and os.path.exists(destination):
+            stem, ext = os.path.splitext(destination)
+            n = 2
+            while os.path.exists(f"{stem} ({n}){ext}"):
+                n += 1
+            destination = f"{stem} ({n}){ext}"
+
+        try:
+            _move_file(item["quarantine_path"], destination)
+        except (QuarantineError, OSError) as exc:
+            failures.append({"path": item["original_path"], "error": str(exc)})
+            continue
+
+        if moved_elsewhere:
+            relocated.append({**dict(item), "restored_to": destination})
+        else:
+            restored.append(dict(item))
+
+    cleared = restored + relocated
+
+    if cleared:
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.executemany(
+                "DELETE FROM quarantine_items WHERE id = ?",
+                [(item["id"],) for item in cleared],
+            )
+            # Back to 'present' only for files actually at their indexed
+            # location. Their hashes are still valid — the bytes never
+            # changed, only the location.
+            #
+            # file_id 0 is a recovered item with no matching index row.
+            # The file still goes back to its original path; there is
+            # simply no row to update, and a later scan picks it up.
+            if restored:
+                conn.executemany(
+                    "UPDATE files SET state = 'present' WHERE id = ?",
+                    [(item["file_id"],) for item in restored if item["file_id"]],
+                )
+            if relocated:
+                conn.executemany(
+                    "UPDATE files SET state = 'missing' WHERE id = ?",
+                    [(item["file_id"],) for item in relocated if item["file_id"]],
+                )
+            conn.execute(
+                "UPDATE quarantine_batches SET file_count = file_count - ?, "
+                "bytes = bytes - ? WHERE id = ?",
+                (
+                    len(cleared),
+                    sum(item["size"] for item in cleared),
+                    batch_id,
+                ),
+            )
+            conn.commit()
+
+    return {
+        "batch_id": batch_id,
+        "restored": len(restored),
+        "relocated": len(relocated),
+        # One path is enough for the UI to point at; the rest are siblings.
+        "relocated_to": relocated[0]["restored_to"] if relocated else None,
+        "failures": failures,
+    }
+
+
+def restore_item(item_id: int) -> dict:
+    """
+    Puts one quarantined file back, leaving the rest of its batch alone.
+
+    A producer scanning a batch of five hundred usually wants three of
+    them back, not all of them — and having to restore the whole batch
+    and re-select the other four hundred and ninety-seven is not an
+    answer.
+
+    The batch row stays even when this empties it. Purging is the one
+    destructive thing in this app and it is never a side effect.
+    """
+    row = db.get_conn().execute(
+        "SELECT i.id, i.batch_id, i.file_id, i.original_path, "
+        "       i.quarantine_path, i.size, b.purged_at "
+        "FROM quarantine_items i "
+        "JOIN quarantine_batches b ON b.id = i.batch_id "
+        "WHERE i.id = ?",
+        (item_id,),
+    ).fetchone()
+
+    if row is None:
+        raise QuarantineError("That file is no longer in quarantine")
+    if row["purged_at"]:
+        raise QuarantineError("That batch was permanently deleted")
+
+    return _restore_rows(row["batch_id"], [row], db.list_roots())
 
 def restore_batch(batch_id: int) -> dict:
     """
@@ -322,6 +700,17 @@ def restore_batch(batch_id: int) -> dict:
     overwritten. The producer may have re-downloaded the kit, and
     clobbering their current file to restore an older copy of it would
     be its own kind of loss.
+
+    A file whose original folder no longer exists is not put back into a
+    folder recreated for the purpose — a producer who reorganised their
+    library meant to. It goes to a restore folder beside the library
+    instead, and is reported as relocated so they know where to look.
+
+    Relocated files leave quarantine but do not return to the index as
+    present: the index knows them by root and relative path, and that is
+    no longer where they are. They are marked missing, which is the
+    truth, and a later scan picks them up if they are ever moved into a
+    library folder.
     """
     batch = db.get_conn().execute(
         "SELECT id, purged_at FROM quarantine_batches WHERE id = ?",
@@ -338,53 +727,9 @@ def restore_batch(batch_id: int) -> dict:
         (batch_id,),
     ).fetchall()
 
-    restored = []
-    failures = []
+    roots = db.list_roots()
 
-    for item in items:
-        if os.path.exists(item["original_path"]):
-            failures.append({
-                "path": item["original_path"],
-                "error": "A file already exists at this path; left untouched.",
-            })
-            continue
-        try:
-            _move_file(item["quarantine_path"], item["original_path"])
-        except (QuarantineError, OSError) as exc:
-            failures.append({"path": item["original_path"], "error": str(exc)})
-            continue
-        restored.append(item)
-
-    if restored:
-        with db._write_lock:
-            conn = db.get_conn()
-            conn.executemany(
-                "DELETE FROM quarantine_items WHERE id = ?",
-                [(item["id"],) for item in restored],
-            )
-            # Rows go back to 'present' by file id. Their hashes are
-            # still valid — the bytes never changed, only the location.
-            conn.executemany(
-                "UPDATE files SET state = 'present' WHERE id = ?",
-                [(item["file_id"],) for item in restored],
-            )
-            conn.execute(
-                "UPDATE quarantine_batches SET file_count = file_count - ?, "
-                "bytes = bytes - ? WHERE id = ?",
-                (
-                    len(restored),
-                    sum(item["size"] for item in restored),
-                    batch_id,
-                ),
-            )
-            conn.commit()
-
-    return {
-        "batch_id": batch_id,
-        "restored": len(restored),
-        "failures": failures,
-    }
-
+    return _restore_rows(batch_id, items, roots)
     
 
 def purge_batch(batch_id: int) -> dict:

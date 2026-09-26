@@ -8,3 +8,4 @@ duplicates.html
 node_modules/
 dist/
 build/worker/
+*.profraw

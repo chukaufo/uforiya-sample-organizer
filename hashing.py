@@ -21,7 +21,12 @@ from typing import Optional
 # rarely duplicated in a way that costs disk, and a producer who finds
 # their .fst presets listed as duplicates alongside samples would
 # reasonably wonder what else this app thinks it owns.
-AUDIO_EXTENSIONS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
+AUDIO_EXTENSIONS = {
+    # Uncompressed / lossless — what kits actually ship as
+    ".wav", ".aiff", ".aif", ".aifc", ".flac", ".caf", ".w64", ".wv", ".ape",
+    # Lossy
+    ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma", ".mp2",
+}
 
 # Bytes read from each end for the tier-2 partial hash.
 #

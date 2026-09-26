@@ -13,6 +13,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 APP_NAME = "Uforiya"
 
@@ -60,6 +61,40 @@ def quarantine_dir() -> Path:
     quarantine move fails halfway through a batch.
     """
     path = app_data_dir() / "quarantine"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def restored_dir(near: Optional[str] = None) -> Path:
+    """
+    Where a restored file goes when its original folder is gone.
+
+    A producer who renamed or deleted a kit folder made that decision on
+    purpose. Recreating the folder to put a file back fights it, and
+    leaves them with both the folder they renamed and the one they
+    didn't. Everything that has lost its home lands here instead, in one
+    place they can deal with deliberately.
+
+    Beside the library root rather than inside it, so a rescan does not
+    immediately re-index the restored copies as duplicates of whatever
+    is still in the library.
+
+    `near` is the library root the file came from. When that is gone
+    too — the root was removed, or the drive is not connected — app-data
+    is the fallback, because it is the one location guaranteed to exist
+    and be writable.
+    """
+    if near:
+        parent = Path(near).parent
+        if parent.is_dir():
+            path = parent / f"{APP_NAME} Restored"
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError:
+                pass   # Read-only, or gone between the check and the call.
+
+    path = app_data_dir() / "Restored"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -9,7 +9,9 @@ import argparse
 import json
 import mimetypes
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 from typing import List, Optional
 
@@ -22,7 +24,7 @@ import duplicates
 import jobs
 import quarantine
 import scanner
-from platform_paths import normalize_path
+from platform_paths import IS_WINDOWS, bundled_binary, normalize_path
 
 VERSION = "0.1.0"
 
@@ -76,6 +78,28 @@ class AddRootRequest(BaseModel):
 class QuarantineRequest(BaseModel):
     file_ids: List[int]
 
+# ── Startup ──────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+def recover_quarantine():
+    """
+    Adopts any quarantined files the index lost track of.
+
+    Runs before the first request, so a producer whose app was killed
+    mid-move opens Quarantine and sees their samples rather than an
+    empty screen. Failure here is not fatal — a worker that cannot
+    recover must still start, so the app remains usable.
+    """
+    try:
+        result = quarantine.recover_orphan_batches()
+        if result["files"]:
+            print(
+                f"Recovered {result['files']} quarantined file(s) "
+                f"across {result['batches']} batch(es)",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"Quarantine recovery failed: {exc}", file=sys.stderr)
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
@@ -290,6 +314,100 @@ def get_duplicate_group(group_id: str):
         raise HTTPException(status_code=404, detail="Group not found or no longer duplicated")
     return group
     
+# ── Audio serving ────────────────────────────────────────────────────────────
+
+# What Chromium plays natively. Everything else is real audio a producer
+# has in their library and must be able to hear before deciding to delete
+# it — AIFF above all, which is native on Mac and which the browser has
+# never supported.
+BROWSER_PLAYABLE = {
+    ".wav", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac",
+}
+
+# Generous for a one-shot, short enough that a pathological file cannot
+# wedge a request thread.
+TRANSCODE_TIMEOUT = 30
+
+
+def _transcode_to_wav(path: str) -> bytes:
+    """
+    Decodes any format FFmpeg understands into PCM WAV.
+
+    WAV rather than MP3 because there is no encoder to run — this is a
+    decode and a header, which is as close to instant as it gets, and
+    preview playback of a sample should never wait on an encoder.
+
+    Written to a temp file rather than piped: a WAV header carries the
+    data length, and FFmpeg writing to a pipe cannot know it in advance,
+    so it emits a placeholder that some players handle and some do not.
+    A temp file costs one write and removes the ambiguity.
+    """
+    handle, temp = tempfile.mkstemp(suffix=".wav")
+    os.close(handle)
+
+    # Without this Windows flashes a console window on every preview.
+    flags = 0x08000000 if IS_WINDOWS else 0   # CREATE_NO_WINDOW
+
+    try:
+        subprocess.run(
+            [
+                bundled_binary("ffmpeg"),
+                "-y", "-loglevel", "error",
+                "-i", path,
+                "-map", "a:0",          # first audio stream; ignore album art
+                "-c:a", "pcm_s16le",
+                temp,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=TRANSCODE_TIMEOUT,
+            creationflags=flags,
+        )
+        with open(temp, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+
+
+def _audio_response(path: str) -> Response:
+    """
+    Serves a file for preview, converting it first if it has to.
+
+    Shared by both audio routes, so a library file and a quarantined one
+    behave identically — the only difference between them is where the
+    bytes live.
+
+    A failure here is a preview failure, never a data one: nothing is
+    moved, changed or deleted, and the producer simply cannot hear that
+    one file.
+    """
+    extension = os.path.splitext(path)[1].lower()
+
+    if extension in BROWSER_PLAYABLE:
+        data = open(path, "rb").read()
+        media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    else:
+        try:
+            data = _transcode_to_wav(path)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=503,
+                detail="Preview needs FFmpeg, which isn't available in this build.",
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="That file took too long to decode.")
+        except subprocess.CalledProcessError:
+            raise HTTPException(status_code=422, detail="That file could not be decoded.")
+        media_type = "audio/wav"
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes", "Content-Length": str(len(data))},
+    )
 
 # ── Quarantine ───────────────────────────────────────────────────────────────
 
@@ -308,11 +426,54 @@ def post_quarantine(body: QuarantineRequest):
     except quarantine.QuarantineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+@app.post("/quarantine/items/{item_id}/restore", dependencies=[Depends(require_token)])
+def post_restore_item(item_id: int):
+    """One file back where it came from. Its batch is left as it is."""
+    try:
+        return quarantine.restore_item(item_id)
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 
 @app.get("/quarantine", dependencies=[Depends(require_token)])
 def get_quarantine():
-    return {"batches": quarantine.list_batches()}
+    return {
+        "batches": quarantine.list_batches(),
+        "recovered": quarantine.LAST_RECOVERY,
+    }
 
+# Declared before /quarantine/{batch_id} because FastAPI matches in
+# declaration order, and 'items' would otherwise be read as a batch id.
+@app.get("/quarantine/items/{item_id}/audio")
+def get_quarantine_audio(item_id: int, token: str = Query(...)):
+    """
+    Streams a quarantined file from its staging copy.
+
+    Preview matters more here than anywhere else in the app. This is the
+    screen where a producer decides whether to delete something
+    permanently, and a decision about a kit they paid for should not have
+    to be made on a filename alone.
+
+    Keyed on the quarantine item rather than the file id: a recovered
+    item may have no index row at all, and its file is exactly the one
+    most worth being able to hear.
+    """
+    if token != TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    row = db.get_conn().execute(
+        "SELECT quarantine_path FROM quarantine_items WHERE id = ?",
+        (item_id,),
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    path = row["quarantine_path"]
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File is no longer on disk")
+
+    return _audio_response(path)
 
 @app.get("/quarantine/{batch_id}", dependencies=[Depends(require_token)])
 def get_quarantine_batch(batch_id: int):
@@ -378,16 +539,7 @@ def get_audio(file_id: int, token: str = Query(...)):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File is no longer on disk")
 
-    media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-    size = os.path.getsize(path)
-
-    # Whole file, no range requested. One-shots are small enough that this
-    # is the common case.
-    return Response(
-        content=open(path, "rb").read(),
-        media_type=media_type,
-        headers={"Accept-Ranges": "bytes", "Content-Length": str(size)},
-    )
+    return _audio_response(path)
     
 # ── Stats ────────────────────────────────────────────────────────────────────
 
