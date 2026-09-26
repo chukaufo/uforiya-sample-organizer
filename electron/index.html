@@ -1190,9 +1190,41 @@ function renderQuarantineFile(item) {
     }
   };
 
+  // The per-file counterpart to the batch's Delete permanently, and the
+  // only control in this row that destroys anything. Confirmed by name,
+  // because "are you sure" on an unnamed file is not a real question.
+  const purge = document.createElement('button');
+  purge.className = 'small danger';
+  purge.textContent = 'Delete';
+  purge.onclick = async () => {
+    if (!confirm(
+      `Permanently delete ${baseName(item.original_path)}?\n\n` +
+      `This frees ${bytes(item.size)} and cannot be undone.`
+    )) return;
+
+    purge.disabled = true;
+    restore.disabled = true;
+    purge.textContent = 'Deleting…';
+
+    try {
+      await api(`/quarantine/items/${item.id}`, { method: 'DELETE' });
+      quarantineItems.clear();   // this file is gone from its batch
+
+      if (playingId === 'q' + item.id) stopAudio();
+
+      await loadQuarantine();
+    } catch (err) {
+      purge.disabled = false;
+      restore.disabled = false;
+      purge.textContent = 'Delete';
+      showError(err.message);
+    }
+  };
+
   row.appendChild(play);
   row.appendChild(body);
   row.appendChild(restore);
+  row.appendChild(purge);
   return row;
 }
 
@@ -1236,10 +1268,15 @@ async function loadQuarantine() {
   // know the samples are here, not gone.
   if (!recoveryNoticeShown && data.recovered && data.recovered.files > 0) {
     recoveryNoticeShown = true;
+    const n = data.recovered.files;
     showNotice(
-      `${count(data.recovered.files)} file${data.recovered.files === 1 ? '' : 's'} ` +
-      `were recovered into quarantine after the app closed unexpectedly. ` +
-      `Nothing was lost — Put back returns them to where they came from.`
+      (n === 1
+        ? `1 file was recovered`
+        : `${count(n)} files were recovered`) +
+      ` into quarantine after the app closed unexpectedly. ` +
+      `Nothing was lost. Put back ` +
+      (n === 1 ? `returns it` : `returns them`) +
+      ` to where ${n === 1 ? 'it came' : 'they came'} from.`
     );
   }
 

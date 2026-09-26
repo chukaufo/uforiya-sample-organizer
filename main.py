@@ -426,6 +426,8 @@ def post_quarantine(body: QuarantineRequest):
     except quarantine.QuarantineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+
+
 @app.post("/quarantine/items/{item_id}/restore", dependencies=[Depends(require_token)])
 def post_restore_item(item_id: int):
     """One file back where it came from. Its batch is left as it is."""
@@ -435,6 +437,14 @@ def post_restore_item(item_id: int):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.delete("/quarantine/items/{item_id}", dependencies=[Depends(require_token)])
+def delete_quarantine_item(item_id: int):
+    """Permanent deletion of one file. Deliberate, never automatic."""
+    try:
+        return quarantine.purge_item(item_id)
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+        
 @app.get("/quarantine", dependencies=[Depends(require_token)])
 def get_quarantine():
     return {

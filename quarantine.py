@@ -731,6 +731,65 @@ def restore_batch(batch_id: int) -> dict:
 
     return _restore_rows(batch_id, items, roots)
     
+def purge_item(item_id: int) -> dict:
+    """
+    Permanently deletes one quarantined file, leaving its batch alone.
+
+    The per-file counterpart to purge_batch, and the same rule applies:
+    this is the only thing in the app that destroys a producer's data,
+    and it only ever happens because they chose it for this file.
+
+    The journal line stays. It is an append-only record of what was
+    moved, and rewriting history to hide a deletion would make the one
+    file that recovery must never adopt look like one it should — the
+    file is gone from disk, so recovery's own isfile check already
+    refuses it.
+    """
+    row = db.get_conn().execute(
+        "SELECT i.id, i.batch_id, i.file_id, i.quarantine_path, i.size, "
+        "       b.purged_at "
+        "FROM quarantine_items i "
+        "JOIN quarantine_batches b ON b.id = i.batch_id "
+        "WHERE i.id = ?",
+        (item_id,),
+    ).fetchone()
+
+    if row is None:
+        raise QuarantineError("That file is no longer in quarantine")
+    if row["purged_at"]:
+        raise QuarantineError("That batch was permanently deleted")
+
+    try:
+        os.remove(row["quarantine_path"])
+    except FileNotFoundError:
+        pass   # Already gone. The row is what is left to clean up.
+    except OSError as exc:
+        raise QuarantineError(f"Could not delete that file: {exc}")
+
+    with db._write_lock:
+        conn = db.get_conn()
+        conn.execute("DELETE FROM quarantine_items WHERE id = ?", (item_id,))
+        # The index row goes too, rather than becoming 'missing': a
+        # later scan would otherwise keep looking for a file the
+        # producer deliberately destroyed.
+        if row["file_id"]:
+            conn.execute(
+                "DELETE FROM files WHERE id = ?",
+                (row["file_id"],),
+            )
+        conn.execute(
+            "UPDATE quarantine_batches SET file_count = file_count - 1, "
+            "bytes = bytes - ? WHERE id = ?",
+            (row["size"], row["batch_id"]),
+        )
+        conn.commit()
+
+    return {
+        "item_id": item_id,
+        "batch_id": row["batch_id"],
+        "purged": True,
+        "bytes_freed": row["size"],
+    }
 
 def purge_batch(batch_id: int) -> dict:
     """
