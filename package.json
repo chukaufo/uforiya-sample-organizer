@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Finds duplicate samples across a producer's drum kit library",
   "main": "electron/main.js",
-  "author": "Chuka Uwefoh",
+  "author": "Uforiya",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
