@@ -30,4 +30,9 @@ contextBridge.exposeInMainWorld('uforiya', {
   // The page's CSP permits loopback only, so the one outbound request the
   // app makes is done on the privileged side and handed back as data.
   checkForUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+
+  // Batch id, or null for the whole quarantine folder. The path is
+  // resolved by the worker, never passed in from the page.
+  openQuarantineFolder: (batchId) =>
+    ipcRenderer.invoke('quarantine:openFolder', batchId ?? null),
 });

@@ -277,6 +277,11 @@
     user-select: text;   /* the path is there to be copied */
     font-size: 13px;
   }
+  .notice.error-notice {
+    background: #2a1116;
+    border-color: var(--error);
+    color: #ffb3b3;
+  }
   .actions {
     display: flex;
     align-items: flex-start;
@@ -769,15 +774,28 @@ function showError(message) {
 // Something the producer needs to know that is not a failure. Stays put
 // until dismissed — a path they may need to go and look at should not
 // vanish on a timer while they are reading it.
-function showNotice(message) {
+function showNotice(message, action, isError, detail) {
   const div = document.createElement('div');
-  div.className = 'notice';
-  div.innerHTML = `<div style="flex:1">${escapeHtml(message)}</div>`;
+  div.className = 'notice' + (isError ? ' error-notice' : '');
+  div.innerHTML =
+    `<div style="flex:1">${escapeHtml(message)}` +
+    (detail
+      ? `<div style="margin-top:6px;opacity:0.85">${escapeHtml(detail)}</div>`
+      : '') +
+    `</div>`;
 
   const close = document.createElement('button');
   close.className = 'small';
   close.textContent = 'Got it';
   close.onclick = () => div.remove();
+
+  if (action) {
+    const extra = document.createElement('button');
+    extra.className = isError ? 'small' : 'small primary';
+    extra.textContent = action.label;
+    extra.onclick = action.onClick;
+    div.appendChild(extra);
+  }
 
   div.appendChild(close);
   main.prepend(div);
@@ -1135,7 +1153,7 @@ function matchesQuarantine(item) {
     .includes(quarantineQuery.toLowerCase());
 }
 
-function renderQuarantineFile(item) {
+function renderQuarantineFile(item, batchId) {
   const row = document.createElement('div');
   row.className = 'qfile';
 
@@ -1217,7 +1235,13 @@ function renderQuarantineFile(item) {
       purge.disabled = false;
       restore.disabled = false;
       purge.textContent = 'Delete';
-      showError(err.message);
+      showNotice(
+        err.message,
+        { label: 'Open folder', onClick: () => openQuarantineFolder(batchId) },
+        true,
+        `You can open the folder and delete this file yourself, ` +
+        `then press Delete again to clear it from the list.`
+      );
     }
   };
 
@@ -1226,6 +1250,11 @@ function renderQuarantineFile(item) {
   row.appendChild(restore);
   row.appendChild(purge);
   return row;
+}
+
+async function openQuarantineFolder(batchId) {
+  const result = await window.uforiya.openQuarantineFolder(batchId);
+  if (!result.ok) showError(result.error);
 }
 
 async function loadQuarantine() {
@@ -1243,7 +1272,9 @@ async function loadQuarantine() {
       <div class="center">
         <div style="font-size:18px;font-weight:600">Quarantine is empty</div>
         <p>Files you remove are staged here first, and can be put back.</p>
+        <button id="btn-q-open-empty" class="small">Open quarantine folder</button>
       </div>`;
+    el('btn-q-open-empty').onclick = () => openQuarantineFolder(null);
     return;
   }
 
@@ -1258,9 +1289,11 @@ async function loadQuarantine() {
     </p>
     <input id="q-search" class="qsearch" type="search"
            placeholder="Search quarantined samples" autocomplete="off" spellcheck="false">
+    <button id="btn-q-open" class="small" style="margin-left:8px">Open quarantine folder</button>
     <p class="hint" id="q-note" style="margin:0 0 12px"></p>
     <div id="batch-list"></div>`;
   const list = el('batch-list');
+  el('btn-q-open').onclick = () => openQuarantineFolder(null);
 
   // The app found files in quarantine that its index had lost — almost
   // always because it was killed mid-move. Worth saying plainly: a
@@ -1288,7 +1321,7 @@ async function loadQuarantine() {
     const items = await batchItems(entry.batch.id);
     const matches = items.filter(matchesQuarantine);
     entry.box.innerHTML = '';
-    matches.forEach((item) => entry.box.appendChild(renderQuarantineFile(item)));
+    matches.forEach((item) => entry.box.appendChild(renderQuarantineFile(item, entry.batch.id)));
     entry.filled = true;
     return matches.length;
   }
@@ -1403,16 +1436,44 @@ async function loadQuarantine() {
     purge.textContent = 'Delete permanently';
     purge.onclick = async () => {
       if (!confirm(
-        `Permanently delete ${batch.file_count} file(s)?\n\n` +
+        `Permanently delete ${count(batch.file_count)} file(s)?\n\n` +
         `This frees ${bytes(batch.bytes)} and cannot be undone.`
       )) return;
+
+      // Deleting tens of thousands of files is minutes of work on Windows,
+      // not seconds, and a silent window reads as a hang. Quitting partway
+      // leaves the batch half-deleted, so the overlay says so rather than
+      // just spinning.
+      const working = showWorking('Deleting permanently');
+      working.update(1, 1,
+        `${count(batch.file_count)} files · ${bytes(batch.bytes)} · ` +
+        `this can take several minutes. Leave the app open.`);
+
       try {
         await api(`/quarantine/${batch.id}`, { method: 'DELETE' });
         quarantineItems.delete(batch.id);
-        loadQuarantine();
-      } catch (err) { showError(err.message); }
+        await loadQuarantine();
+      } catch (err) {
+        quarantineItems.delete(batch.id);
+        await loadQuarantine();
+        showNotice(
+          err.message,
+          { label: 'Open folder', onClick: () => openQuarantineFolder(batch.id) },
+          true,
+          `You can open the folder and delete what's left yourself, ` +
+          `then press Delete permanently again to clear the batch.`
+        );
+      } finally {
+        working.done();
+      }
     };
 
+    const openFolder = document.createElement('button');
+    openFolder.textContent = 'Open folder';
+    openFolder.title = 'Show this batch in your file manager';
+    openFolder.onclick = () => openQuarantineFolder(batch.id);
+
+    head.appendChild(openFolder);
     head.appendChild(restore);
     head.appendChild(purge);
     list.appendChild(node);

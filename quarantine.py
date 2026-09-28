@@ -20,11 +20,12 @@ import json
 import os
 import shutil
 import time
+from stat import S_IWRITE
 from typing import Optional
 
 import db
 import hashing
-from platform_paths import normalize_path, quarantine_dir, restored_dir
+from platform_paths import IS_WINDOWS, normalize_path, quarantine_dir, restored_dir
 
 # Whole-file manifest written by builds up to 0.1.0. Still read during
 # recovery so a batch made by an older build is not stranded.
@@ -109,6 +110,23 @@ def _verify_unchanged(row: dict, abs_path: str) -> None:
 
 # ── Moving ───────────────────────────────────────────────────────────────────
 
+def _long_path(path: str) -> str:
+    """
+    Windows form of a path that may exceed 260 characters.
+
+    Quarantine nests a kit's full relative path under app-data, so a path
+    that was fine in the producer's library can cross MAX_PATH once it is
+    inside a batch folder. The \\\\?\\ prefix opts out of that limit, and
+    is only meaningful on Windows with a drive-letter path.
+    """
+    if not IS_WINDOWS:
+        return path
+
+    full = os.path.abspath(path)
+    if full.startswith("\\\\"):       # already prefixed, or a UNC share
+        return full
+    return "\\\\?\\" + full.replace("/", "\\")
+
 def _move_file(source: str, destination: str) -> None:
     """
     Moves one file, verifying the copy when a rename is not possible.
@@ -119,20 +137,28 @@ def _move_file(source: str, destination: str) -> None:
     the source. Deleting before verifying is the one way this app
     could actually lose a sample, so the verification is not optional.
     """
-    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    # Both ends go through _long_path: the destination is nested deeper
+    # than the source, so a path that was fine in the producer's library
+    # can cross MAX_PATH once it is inside a batch folder. The error
+    # message below still uses the original, because \\?\C:\... is not a
+    # path anyone wants to read.
+    src = _long_path(source)
+    dst = _long_path(destination)
+
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
 
     try:
-        os.rename(source, destination)
+        os.rename(src, dst)
         return
     except OSError:
         pass  # Cross-volume, or a filesystem that refuses the rename.
 
-    shutil.copy2(source, destination)
+    shutil.copy2(src, dst)
 
-    if not hashing.verify_copy(source, destination):
+    if not hashing.verify_copy(src, dst):
         # Leave the source untouched and clean up the bad copy.
         try:
-            os.remove(destination)
+            os.remove(dst)
         except OSError:
             pass
         raise QuarantineError(
@@ -140,7 +166,7 @@ def _move_file(source: str, destination: str) -> None:
             "Original left in place."
         )
 
-    os.remove(source)
+    os.remove(src)
 
 
 def _journal_path(batch_dir: str) -> str:
@@ -349,10 +375,14 @@ def recover_orphan_batches() -> dict:
         # Only entries whose file is genuinely there. A journal line is
         # a claim, not proof — the move it describes may never have
         # happened, or the file may have been restored since.
+        # _long_path on the isfile check: a quarantine path over MAX_PATH
+        # would report as absent, recovery would conclude the move never
+        # happened, and the file would stay stranded — which is the one
+        # outcome this function exists to prevent.
         adopt = [
             entry for entry in journal["items"]
             if entry["quarantine_path"] not in known
-            and os.path.isfile(entry["quarantine_path"])
+            and os.path.isfile(_long_path(entry["quarantine_path"]))
         ]
         if not adopt:
             continue
@@ -396,6 +426,36 @@ def recover_orphan_batches() -> dict:
     LAST_RECOVERY["batches"] = batches
     LAST_RECOVERY["files"] = files
     return dict(LAST_RECOVERY)
+
+def reconcile_missing_batches() -> int:
+    """
+    Closes out batches whose folder is gone from disk.
+
+    The case: purge failed partway, the producer deleted the rest by hand
+    in Explorer, and the app still lists a batch that no longer exists.
+    Mirrors purge_batch's bookkeeping. Returns how many were closed.
+    """
+    base = str(quarantine_dir())
+    rows = db.get_conn().execute(
+        "SELECT id FROM quarantine_batches WHERE purged_at IS NULL"
+    ).fetchall()
+
+    closed = 0
+    for row in rows:
+        if os.path.isdir(os.path.join(base, str(row["id"]))):
+            continue
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute(
+                "DELETE FROM quarantine_items WHERE batch_id = ?", (row["id"],)
+            )
+            conn.execute(
+                "UPDATE quarantine_batches SET purged_at = ? WHERE id = ?",
+                (int(time.time()), row["id"]),
+            )
+            conn.commit()
+        closed += 1
+    return closed
 
 def quarantine_files(file_ids: list) -> dict:
     """
@@ -562,6 +622,23 @@ def get_batch(batch_id: int) -> Optional[dict]:
     result = dict(batch)
     result["items"] = [dict(row) for row in items]
     return result
+
+def batch_folder(batch_id: Optional[int] = None) -> str:
+    """
+    The folder a producer can open in their file manager.
+
+    Resolved here from an integer id so the renderer never supplies a
+    path. With no id, the quarantine root, which is also the way in
+    when a batch was marked purged but its files are still on disk.
+    """
+    root = str(quarantine_dir())
+    if batch_id is None:
+        return root
+
+    folder = os.path.join(root, str(int(batch_id)))
+    if not os.path.isdir(folder):
+        raise QuarantineError("That batch's folder no longer exists on disk.")
+    return folder
 
 def _restore_rows(batch_id: int, items: list, roots: list) -> dict:
     """
@@ -759,13 +836,20 @@ def purge_item(item_id: int) -> dict:
     if row["purged_at"]:
         raise QuarantineError("That batch was permanently deleted")
 
+    target = _long_path(row["quarantine_path"])
     try:
-        os.remove(row["quarantine_path"])
+        try:
+            os.remove(target)
+        except PermissionError:
+            # The read-only attribute is the common Windows refusal.
+            # Clear it and retry once; other platforms just retry.
+            if IS_WINDOWS:
+                os.chmod(target, S_IWRITE)
+            os.remove(target)
     except FileNotFoundError:
         pass   # Already gone. The row is what is left to clean up.
     except OSError as exc:
         raise QuarantineError(f"Could not delete that file: {exc}")
-
     with db._write_lock:
         conn = db.get_conn()
         conn.execute("DELETE FROM quarantine_items WHERE id = ?", (item_id,))
@@ -791,6 +875,55 @@ def purge_item(item_id: int) -> dict:
         "bytes_freed": row["size"],
     }
 
+def _is_gone(path: str) -> bool:
+    """
+    True only when the file is definitely absent.
+
+    FileNotFoundError specifically, not any OSError: a file inside a
+    folder the app cannot read reports as inaccessible, and treating
+    that as 'deleted' would drop the row for a file still on disk.
+    """
+    try:
+        os.stat(_long_path(path))
+        return False
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _drop_deleted_items(batch_id: int) -> None:
+    """
+    After a partly failed purge, forgets the items that really were
+    deleted so the batch lists only what is left. Same bookkeeping as
+    purge_item: the row, the index entry, and the batch totals.
+    """
+    rows = db.get_conn().execute(
+        "SELECT id, file_id, quarantine_path, size "
+        "FROM quarantine_items WHERE batch_id = ?",
+        (batch_id,),
+    ).fetchall()
+
+    gone = [r for r in rows if _is_gone(r["quarantine_path"])]
+    if not gone:
+        return
+
+    with db._write_lock:
+        conn = db.get_conn()
+        conn.executemany(
+            "DELETE FROM quarantine_items WHERE id = ?",
+            [(r["id"],) for r in gone],
+        )
+        index_rows = [(r["file_id"],) for r in gone if r["file_id"]]
+        if index_rows:
+            conn.executemany("DELETE FROM files WHERE id = ?", index_rows)
+        conn.execute(
+            "UPDATE quarantine_batches SET file_count = file_count - ?, "
+            "bytes = bytes - ? WHERE id = ?",
+            (len(gone), sum(r["size"] for r in gone), batch_id),
+        )
+        conn.commit()
+
 def purge_batch(batch_id: int) -> dict:
     """
     Permanently deletes a batch. The only destructive operation in the
@@ -812,7 +945,38 @@ def purge_batch(batch_id: int) -> dict:
         (batch_id,),
     ).fetchone()["n"]
 
-    shutil.rmtree(batch_dir, ignore_errors=True)
+    # ignore_errors=True was hiding every real failure here — a locked file,
+    # a path over MAX_PATH, a permission refusal — while the rows below were
+    # written anyway. That left the files on disk with the batch marked
+    # purged, which recovery deliberately skips, so nothing in the app could
+    # ever see or remove them again.
+    failures = []
+
+    def _on_error(func, path, exc_info):
+        # The read-only attribute is the common Windows refusal. Clear it
+        # and retry once; anything that still fails is a real failure.
+        try:
+            if IS_WINDOWS:
+                os.chmod(path, S_IWRITE)
+            func(path)
+        except OSError as retry_err:
+            # rmtree also reports the folders it couldn't remove because a
+            # file inside survived. Those are consequences, not causes, so
+            # only file-level failures are counted and quoted.
+            if func in (os.unlink, os.remove):
+                failures.append({"path": path, "error": str(retry_err)})
+    shutil.rmtree(_long_path(batch_dir), onerror=_on_error)
+
+    # The batch is only recorded as deleted when the folder is genuinely
+    # gone. Anything left means the producer still has those files and must
+    # be able to try again.
+    if os.path.isdir(batch_dir):
+        _drop_deleted_items(batch_id)
+        raise QuarantineError(
+            f"{max(len(failures), 1)} file(s) could not be deleted, so nothing was "
+            f"marked as removed. First problem: "
+            f"{failures[0]['error'] if failures else 'folder still present'}"
+        )
 
     with db._write_lock:
         conn = db.get_conn()

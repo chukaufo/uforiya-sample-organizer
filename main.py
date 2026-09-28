@@ -26,7 +26,7 @@ import quarantine
 import scanner
 from platform_paths import IS_WINDOWS, bundled_binary, normalize_path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # Set from --token at startup, or UFORIYA_DEV_TOKEN when running under
 # uvicorn directly in development.
@@ -100,6 +100,13 @@ def recover_quarantine():
             )
     except Exception as exc:
         print(f"Quarantine recovery failed: {exc}", file=sys.stderr)
+
+    try:
+        closed = quarantine.reconcile_missing_batches()
+        if closed:
+            print(f"Closed {closed} batch(es) whose folder was gone", file=sys.stderr)
+    except Exception as exc:
+        print(f"Quarantine reconcile failed: {exc}", file=sys.stderr)
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
@@ -451,6 +458,17 @@ def get_quarantine():
         "batches": quarantine.list_batches(),
         "recovered": quarantine.LAST_RECOVERY,
     }
+
+@app.get("/quarantine/folder", dependencies=[Depends(require_token)])
+def get_quarantine_folder(batch_id: Optional[int] = None):
+    """
+    Where a batch (or the whole quarantine area) lives on disk, for the
+    'Open folder' buttons. The renderer sends an id, never a path.
+    """
+    try:
+        return {"path": quarantine.batch_folder(batch_id)}
+    except quarantine.QuarantineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 # Declared before /quarantine/{batch_id} because FastAPI matches in
 # declaration order, and 'items' would otherwise be read as a batch id.

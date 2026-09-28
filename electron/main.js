@@ -221,6 +221,32 @@ ipcMain.handle('worker:info', () => ({
 
 ipcMain.handle('app:version', () => app.getVersion());
 
+// Opens a quarantine folder in Explorer/Finder. The renderer sends only a
+// batch id (or null for the root); the worker resolves the real path, so
+// the page can never ask this process to open an arbitrary location.
+ipcMain.handle('quarantine:openFolder', async (_event, batchId) => {
+  const id = batchId == null ? null : Number(batchId);
+  if (id !== null && !Number.isInteger(id)) {
+    return { ok: false, error: 'Invalid batch.' };
+  }
+
+  try {
+    const query = id === null ? '' : `?batch_id=${id}`;
+    const res = await fetch(
+      `http://127.0.0.1:${workerPort}/quarantine/folder${query}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } }
+    );
+    const body = await res.json();
+    if (!res.ok) return { ok: false, error: body.detail || 'Could not find that folder.' };
+
+    // openPath resolves to '' on success, or an error string.
+    const failure = await shell.openPath(body.path);
+    return failure ? { ok: false, error: failure } : { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // Update check lives here, not in the renderer, because the page's CSP
 // only permits loopback — and should stay that way. This is the single
 // outbound request the app ever makes, it is triggered by the producer
