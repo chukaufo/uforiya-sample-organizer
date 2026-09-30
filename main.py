@@ -26,7 +26,7 @@ import quarantine
 import scanner
 from platform_paths import IS_WINDOWS, bundled_binary, normalize_path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # Set from --token at startup, or UFORIYA_DEV_TOKEN when running under
 # uvicorn directly in development.

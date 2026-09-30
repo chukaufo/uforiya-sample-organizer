@@ -978,9 +978,27 @@ def purge_batch(batch_id: int) -> dict:
             f"{failures[0]['error'] if failures else 'folder still present'}"
         )
 
+    # The index rows go too, matching purge_item. Without this, every
+    # batch-purged file left a row behind at state 'quarantined'
+    # pointing at a file that no longer exists, and a later scan would
+    # keep carrying files the producer deliberately destroyed.
+    #
+    # file_id 0 is a recovered item with no index row — nothing to
+    # delete for those.
+    file_ids = [
+        (row["file_id"],)
+        for row in db.get_conn().execute(
+            "SELECT file_id FROM quarantine_items WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchall()
+        if row["file_id"]
+    ]
+
     with db._write_lock:
         conn = db.get_conn()
         conn.execute("DELETE FROM quarantine_items WHERE batch_id = ?", (batch_id,))
+        if file_ids:
+            conn.executemany("DELETE FROM files WHERE id = ?", file_ids)
         conn.execute(
             "UPDATE quarantine_batches SET purged_at = ? WHERE id = ?",
             (int(time.time()), batch_id),

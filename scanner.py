@@ -257,6 +257,39 @@ def _sizes_with_duplicates() -> set:
     ).fetchall()
     return {row["size"] for row in rows}
 
+def _partials_of_hashed_files(digests: list) -> set:
+    """
+    Which of these partial hashes already sit on a fully hashed file.
+
+    Answers the question tier 2 could not. A candidate's partial hash
+    matching nothing among the other candidates does not mean the file
+    is unique — it may mean its twin was hashed on an earlier scan and
+    is no longer a candidate.
+
+    Chunked because a large rescan can carry more digests than SQLite
+    accepts host parameters in one statement.
+    """
+    if not digests:
+        return set()
+
+    found = set()
+    conn = db.get_conn()
+    CHUNK = 500
+
+    for start in range(0, len(digests), CHUNK):
+        chunk = digests[start:start + CHUNK]
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT partial_hash FROM files
+            WHERE state = 'present'
+              AND sha256 IS NOT NULL
+              AND partial_hash IN ({','.join('?' * len(chunk))})
+            """,
+            tuple(chunk),
+        ).fetchall()
+        found.update(row["partial_hash"] for row in rows)
+
+    return found
 
 def _hash_candidates(
     root_id: int,
@@ -327,11 +360,22 @@ def _hash_candidates(
     # already in the row they came from.
     _store_partials(root_id, computed_partials)
 
-    # Only partial hashes shared by two or more files justify a full
-    # read. A unique partial hash means a unique file — and it keeps
-    # its stored partial so the next scan skips it.
+    # Two ways a candidate earns a full read: its partial hash is shared
+    # with another candidate, or it is shared with a file the index
+    # hashed on an earlier scan.
+    #
+    # The second case is what this missed. Candidates are files with no
+    # sha256, so a kit duplicated after its original was already hashed
+    # left only the new copy in this dict. Its partial group had one
+    # member, no full hash ran, and the pair could never group — every
+    # duplicate of an already-hashed file was invisible.
+    already_hashed = _partials_of_hashed_files(list(partials.keys()))
+
     full_candidates = [
-        rel for group in partials.values() if len(group) > 1 for rel in group
+        rel
+        for digest, group in partials.items()
+        if len(group) > 1 or digest in already_hashed
+        for rel in group
     ]
 
     if not full_candidates:

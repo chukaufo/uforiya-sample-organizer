@@ -1,6 +1,6 @@
 {
   "name": "uforiya-sample-organizer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Finds duplicate samples across a producer's drum kit library",
   "main": "electron/main.js",
   "author": "Uforiya",
